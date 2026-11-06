@@ -1,0 +1,37 @@
+{
+  "name": "nurtron",
+  "productName": "Nurtron",
+  "version": "0.1.0",
+  "description": "A sandbox where you wire up a living creature's body, then raise what you've made.",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "vite build && electron .",
+    "dev": "node scripts/dev.mjs",
+    "web": "vite",
+    "bar": "node scripts/learning-bar.ts",
+    "test": "vitest run",
+    "check": "tsc --noEmit",
+    "check-env": "node scripts/check-env.ts && node scripts/check-app.mjs",
+    "icon": "node scripts/make-icon.mjs",
+    "build-linux": "vite build && electron-packager . Nurtron --platform=linux --arch=x64 --out=release --overwrite --icon=assets/icon.png --ignore=^/src --ignore=^/tests --ignore=^/scripts --ignore=^/docs --ignore=^/release --ignore=^/\\.claude",
+    "build-win": "vite build && electron-packager . Nurtron --platform=win32 --arch=x64 --out=release --overwrite --icon=assets/icon.png --ignore=^/src --ignore=^/tests --ignore=^/scripts --ignore=^/docs --ignore=^/release --ignore=^/\\.claude",
+    "life": "node scripts/life.ts"
+  },
+  "dependencies": {
+    "@dimforge/rapier2d-compat": "^0.21.0",
+    "pixi.js": "^8.22.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "@types/node": "^26.6.6",
+    "electron": "^45.2.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.6",
+    "vitest": "^5.1.0"
+  }
+}

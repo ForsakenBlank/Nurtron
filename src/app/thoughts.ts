@@ -1,0 +1,108 @@
+// what each creature has been thinking and doing lately, in plain words. it's only for the player, so it isn't saved.
+import { describe } from '../sim/senses.ts';
+import { TICKS_PER_SECOND } from '../sim/world.ts';
+import type { Creature, WorldEvent } from '../sim/world.ts';
+
+const MOST_THOUGHTS = 40;
+
+export type ThoughtKind = 'decide' | 'told' | 'good' | 'bad' | 'plain';
+
+export interface Thought {
+  tick: number;
+  words: string;
+  kind: ThoughtKind;
+}
+
+const DOING = {
+  approach: 'walk over to',
+  avoid: 'back away from',
+  touch: 'touch',
+  grab: 'grab',
+  drop: 'drop what it was holding',
+  push: 'push',
+  rest: 'have a rest',
+  call: 'call out',
+  wander: 'wander off',
+} as const;
+
+const DOING_NOW = {
+  approach: 'Walking over to',
+  avoid: 'Backing away from',
+  touch: 'Going to touch',
+  grab: 'Going to grab',
+  drop: 'Dropping what it was holding',
+  push: 'Going to push',
+  rest: 'Having a rest',
+  call: 'Calling out',
+  wander: 'Wandering off to look around',
+} as const;
+
+// what it's up to this very moment, in words
+export function doingNow(c: Creature, targetName: string | null): string {
+  if (c.dead) return 'Dead';
+  if (c.hatching > 0) return 'Hatching';
+  if (c.dragged) return 'Being carried about';
+  if (c.stunned > 0) return 'Recovering from that slap';
+  if (!c.doing) return 'Working out what to do next';
+  const words = DOING_NOW[c.doing.action];
+  return targetName ? `${words} the ${targetName}` : words;
+}
+
+export class ThoughtLog {
+  private byCreature = new Map<number, Thought[]>();
+
+  of(id: number): Thought[] {
+    return this.byCreature.get(id) ?? [];
+  }
+
+  private add(id: number, tick: number, words: string, kind: ThoughtKind): void {
+    const list = this.byCreature.get(id) ?? [];
+    list.unshift({ tick, words, kind });
+    if (list.length > MOST_THOUGHTS) list.pop();
+    this.byCreature.set(id, list);
+  }
+
+  take(events: WorldEvent[], tick: number, everyone: number[]): void {
+    for (const event of events) {
+      if (event.type === 'said') {
+        if (event.by !== null) this.add(event.by, tick, `Said "${event.word}"`, 'good');
+        for (const id of everyone) if (id !== event.by) this.add(id, tick, `Heard "${event.word}"`, 'plain');
+        continue;
+      }
+      if (event.type === 'pulse' || event.type === 'loop' || event.type === 'sound' || event.type === 'burst' || event.type === 'solved') continue;
+      const who = event.who;
+      if (event.type === 'decided') {
+        const what = event.decision.chosen.percept ? ` the ${describe(event.decision.chosen.percept)}` : '';
+        const verb = DOING[event.decision.action];
+        this.add(who, tick, event.told ? `You told it to ${verb}${what}` : `Decided to ${verb}${what}`, event.told ? 'told' : 'decide');
+      } else if (event.type === 'touched') {
+        if (event.fatal) continue; // the line about dying already says so
+        this.add(who, tick, event.ate ? `Touched the ${event.name}, and that helped` : `Touched the ${event.name}. Nothing much happened`, event.ate ? 'good' : 'plain');
+      } else if (event.type === 'petted') {
+        this.add(who, tick, 'You petted it', 'good');
+      } else if (event.type === 'slapped') {
+        this.add(who, tick, 'You slapped it', 'bad');
+      } else if (event.type === 'called') {
+        this.add(who, tick, 'Called out', 'plain');
+      } else if (event.type === 'hatched') {
+        this.add(who, tick, 'Hatched', 'good');
+      } else if (event.type === 'laid') {
+        this.add(who, tick, 'Was laid as an egg', 'good');
+      } else if (event.type === 'died') {
+        this.add(who, tick, `Died. ${event.lesson}`, 'bad');
+      } else if (event.type === 'revived') {
+        this.add(who, tick, 'Came back, and remembers dying', 'good');
+      } else if (event.type === 'gaveUp') {
+        this.add(who, tick, event.name ? `Couldn't get to the ${event.name}, so it gave up` : 'Gave up', 'bad');
+      } else if (event.type === 'taught') {
+        this.add(who, tick, `Remembered doing that${event.name ? ` to the ${event.name}` : ''}`, 'good');
+      }
+    }
+  }
+}
+
+export function ago(fromTick: number, nowTick: number): string {
+  const seconds = Math.max(0, Math.round((nowTick - fromTick) / TICKS_PER_SECOND));
+  if (seconds < 2) return 'just now';
+  return seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ago`;
+}
