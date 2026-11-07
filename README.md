@@ -2,8 +2,8 @@
 
 > [!WARNING]
 > **This game is vibe coded and early.** It was built mostly by chatting with an AI coding assistant, not written
-> line by line by an experienced developer. Expect rough edges and bugs. There's no tutorial yet and no download yet,
-> so you run it from source for now. It's mostly been used on Linux, and the Windows build is barely tested.
+> line by line by an experienced developer. Expect rough edges and bugs. There's no tutorial yet. You can download a build from
+> [Releases](https://github.com/ForsakenBlank/Nurtron/releases), or run it from source. It's mostly been used on Linux, and the Windows build is barely tested.
 
 **You wire up a living creature's body, then raise what you've made.**
 
@@ -16,6 +16,7 @@ In most creature games, the designers decide what a creature's body and needs ar
 ## What's in it
 
 - **Creatures that learn from a handful of experiences**, with a brain small enough to watch working. It shows what they're doing, why, and what they've learned, in plain words.
+- **Minds that grow.** They learn by watching each other, go over what happened while they rest, come to like or avoid places, and work out chains several steps long, like a lever that shows a button that makes food.
 - **Bodies made of real wires.** Hunger, energy and everything else are circuits you can open up and change. Choose ready-made stats, or wire your own.
 - **A physics sandbox.** Build with shapes, ramps, motors and sensors. Rooms can be huge, and gravity can change from place to place, with zero-gravity zones where creatures walk on the air.
 - **Families.** Genes, babies, siblings who act differently, and family trees.
@@ -25,7 +26,7 @@ In most creature games, the designers decide what a creature's body and needs ar
 
 ## Playing it
 
-You need [Node.js](https://nodejs.org) 22.18 or newer.
+The easiest way is to download the Linux or Windows build from [Releases](https://github.com/ForsakenBlank/Nurtron/releases) and run Nurtron from the folder inside. To run it from source instead, you need [Node.js](https://nodejs.org) 22.18 or newer.
 
 ```bash
 git clone https://github.com/ForsakenBlank/Nurtron.git
@@ -54,6 +55,7 @@ npm start
 - **Family** shows what a creature is like and its relatives, and is where two grown-ups can have a baby.
 - **Drag empty space** to look around, **scroll** to zoom, **Shift+drag** to select several, **F** to find your creature, **0** to see the whole room.
 - **The Room arrows** at the bottom left of the map add more space on any side, any time. **World settings** in Files can set an exact size.
+- **App updates**, in Files, says if there's a newer version. It only reads the list from GitHub, and never downloads anything itself.
 - **Tab** or **Mind** shows and hides what it's thinking. Drag the panel's edge to resize it.
 - **Space** pauses, and **1**, **2** and **3** set the speed.
 - Hover over anything to see what it has learned about that thing.
@@ -62,7 +64,7 @@ It saves by itself. Your creatures are still there when you come back, and the w
 
 ### More detail
 
-The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), and words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md).
+The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), and watching, resting, places, planning and app updates are in [docs/milestone-8.md](docs/milestone-8.md).
 
 ## Commands
 
@@ -87,7 +89,7 @@ TypeScript, with Rapier for physics, PixiJS for the room, Electron for the deskt
 
 ```
 src/sim/    the simulation. no graphics at all, so tests can run it thousands of times faster than real time
-  brain.ts          the brain: concepts, links, learning
+  brain.ts          the brain: concepts, links, learning, places, replay, planning
   senses.ts         how it sees things: what they're like, never their names
   shapes.ts         the geometry of things
   physics.ts        the Rapier physics world
@@ -118,9 +120,10 @@ src/app/    the game window
   thoughts.ts       what it has been thinking, in plain words
   pictures.ts       shrinking an image for a shape
   brain-view.ts     the live picture of its brain
+  updates.ts        asking GitHub if there's a newer version
 electron/   the desktop shell
 tests/      automated tests
 docs/       notes on each milestone
 ```
 
-See [docs/milestone-6.md](docs/milestone-6.md) for where things stand. There are no accounts, no servers and no online AI: it all runs on your own PC.
+See [docs/milestone-8.md](docs/milestone-8.md) for where things stand. There are no accounts, no servers and no online AI: it all runs on your own PC.

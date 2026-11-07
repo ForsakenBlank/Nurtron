@@ -32,6 +32,8 @@ import { PackagePanel } from './package-panel.ts';
 import { readPicture } from './pictures.ts';
 import { PropertiesPanel } from './properties.ts';
 import { COLOURS, Scene } from './scene.ts';
+import { compareVersions, fetchReleases, safePage, updateWords } from './updates.ts';
+import type { Release } from './updates.ts';
 
 const SAVE_KEY = 'nurtron.world';
 const TOOLS_KEY = 'nurtron.tools';
@@ -162,6 +164,8 @@ async function boot(): Promise<void> {
             <b>Trials</b>
             <button id="save-trial" title="Save this room as a Trial for a friend's creature to try. A Goal part says what counts as solving it, and a Start part says where creatures begin.">Save as Trial</button>
             <button id="open-trial" title="Try a friend's Trial. Your own room comes back afterwards.">Open Trial</button>
+            <b>Nurtron</b>
+            <button id="updates-open" title="See if there's a newer version of Nurtron">App updates</button>
           </div>
         </div>
         <button id="play" title="Run what you've built as a game, with the editor out of the way. Everything goes back when you stop.">Play</button>
@@ -309,6 +313,20 @@ async function boot(): Promise<void> {
       <div class="muted size-note">Strength 1 is normal, and 0 is none, where creatures float-walk anywhere.</div>
       <div class="prop-actions"><button id="size-apply">Apply to this world</button><button id="size-new" class="danger">Start a new world</button></div>
       <div class="muted size-note"></div>
+    </div>
+    <div id="update-panel" role="dialog" aria-label="App updates">
+      <div class="prop-head"><b>App updates</b><button id="update-close" class="prop-close" aria-label="Close">✕</button></div>
+      <div class="update-row">
+        <span id="update-version"></span>
+        <span class="update-actions">
+          <button id="update-check">Check for updates</button>
+          <button id="update-get" class="accent" hidden>Open download page</button>
+        </span>
+      </div>
+      <div class="muted update-status" id="update-status"></div>
+      <div id="update-list"></div>
+      <label class="update-auto"><input type="checkbox" id="update-auto" /> Check when Nurtron starts</label>
+      <div class="muted size-note">This only asks GitHub which versions there are. Nothing is downloaded or installed unless you open a page and do it yourself.</div>
     </div>
     <div id="tool-menu" class="pop-menu" role="menu"></div>
     <div id="ask" role="alertdialog">
@@ -1391,6 +1409,113 @@ async function boot(): Promise<void> {
       toast('A new world, with a new egg.');
     });
   });
+
+  // app updates, like the ones in Prism: a check, every version with what changed, and a quiet check once a day
+  const UPDATE_KEY = 'nurtron.updates';
+  const updatePanel = $('update-panel');
+  const updatePrefs = ((): { auto: boolean; lastCheck: number } => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(UPDATE_KEY) ?? '{}') as { auto?: unknown; lastCheck?: unknown };
+      return { auto: saved.auto !== false, lastCheck: typeof saved.lastCheck === 'number' ? saved.lastCheck : 0 };
+    } catch {
+      return { auto: true, lastCheck: 0 };
+    }
+  })();
+  const saveUpdatePrefs = (): void => {
+    try {
+      localStorage.setItem(UPDATE_KEY, JSON.stringify(updatePrefs));
+    } catch {
+      // nowhere to keep it, so it just checks again next time
+    }
+  };
+  let updateBusy = false;
+  let updateNewer: Release | null = null;
+  const openPage = (url: string): void => {
+    window.open(safePage(url), '_blank', 'noopener');
+  };
+  function renderReleases(releases: Release[]): void {
+    const list = $('update-list');
+    list.replaceChildren();
+    releases.slice(0, 15).forEach((r, i) => {
+      const box = document.createElement('div');
+      box.className = 'update-release';
+      const head = document.createElement('div');
+      head.className = 'update-release-head';
+      const name = document.createElement('strong');
+      name.textContent = r.tag;
+      const date = document.createElement('span');
+      date.className = 'muted';
+      date.textContent = r.date;
+      head.append(name, date);
+      const badge = (words: string): void => {
+        const b = document.createElement('span');
+        b.className = 'update-badge';
+        b.textContent = words;
+        head.appendChild(b);
+      };
+      if (i === 0) badge('NEWEST');
+      if (compareVersions(r.version, __APP_VERSION__) === 0) badge('INSTALLED');
+      const notes = document.createElement('div');
+      notes.className = 'update-notes';
+      notes.hidden = true;
+      notes.textContent = r.notes.replace(/\*\*/g, '') || 'No notes.';
+      const toggle = document.createElement('button');
+      toggle.textContent = 'What changed';
+      toggle.addEventListener('click', () => {
+        notes.hidden = !notes.hidden;
+        toggle.textContent = notes.hidden ? 'What changed' : 'Hide';
+      });
+      const page = document.createElement('button');
+      page.textContent = 'Download page';
+      page.addEventListener('click', () => openPage(r.page));
+      head.append(toggle, page);
+      box.append(head, notes);
+      list.appendChild(box);
+    });
+  }
+  async function checkForUpdates(quiet: boolean): Promise<void> {
+    if (updateBusy) return;
+    updateBusy = true;
+    const check = $<HTMLButtonElement>('update-check');
+    if (!quiet) {
+      check.disabled = true;
+      $('update-status').textContent = 'Asking GitHub…';
+    }
+    try {
+      const releases = await fetchReleases();
+      updatePrefs.lastCheck = Date.now();
+      saveUpdatePrefs();
+      const { words, newer } = updateWords(releases, __APP_VERSION__);
+      updateNewer = newer;
+      $('update-status').textContent = words;
+      $('update-get').hidden = !newer;
+      renderReleases(releases);
+      if (quiet && newer) toast(`Nurtron ${newer.version} is available. Files, then App updates.`);
+    } catch (err) {
+      if (!quiet) $('update-status').textContent = `Couldn't check: ${(err as Error).message}`;
+    } finally {
+      updateBusy = false;
+      check.disabled = false;
+    }
+  }
+  $('update-version').textContent = `Nurtron ${__APP_VERSION__}`;
+  $<HTMLInputElement>('update-auto').checked = updatePrefs.auto;
+  $<HTMLInputElement>('update-auto').addEventListener('change', (e) => {
+    updatePrefs.auto = (e.target as HTMLInputElement).checked;
+    saveUpdatePrefs();
+  });
+  updatePanel.addEventListener('pointerdown', (e) => e.stopPropagation());
+  updatePanel.addEventListener('keydown', (e) => e.stopPropagation());
+  $('updates-open').addEventListener('click', () => {
+    updatePanel.style.display = 'block';
+    if (!$('update-list').childElementCount) checkForUpdates(false);
+  });
+  $('update-close').addEventListener('click', () => {
+    updatePanel.style.display = 'none';
+  });
+  $('update-check').addEventListener('click', () => checkForUpdates(false));
+  $('update-get').addEventListener('click', () => updateNewer && openPage(updateNewer.page));
+  if (updatePrefs.auto && Date.now() - updatePrefs.lastCheck > 20 * 3600 * 1000) window.setTimeout(() => checkForUpdates(true), 8000);
 
   $('revive').addEventListener('click', () => {
     world.revive();

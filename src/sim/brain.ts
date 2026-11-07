@@ -95,7 +95,7 @@ const DISAPPOINT = 0.08; // how much a link weakens when it was felt but deliver
 const MOST_CHANNELS = 24; // room files can bring nerve sockets with them, so this can't grow forever
 
 const WATCHED = 0.4; // how much a lesson it only saw counts, next to one it felt itself
-const REPLAY = 0.3; // how much going over a moment again counts, next to living it
+const REPLAY = 0.6; // how much going over a moment again counts, next to living it
 const MOST_REPLAYS = 2; // each moment is gone over this many times at most, so a memory can't grow by itself for ever
 const MOST_EPISODES = 12;
 const EPISODE_SECONDS = 300; // only moments from the last few minutes get gone over

@@ -1055,6 +1055,93 @@ button.my-tool {
   font-size: 13px;
 }
 
+#update-panel {
+  position: fixed;
+  z-index: 7;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 45%);
+  font-size: 13px;
+}
+
+.update-row,
+.update-release-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-row {
+  justify-content: space-between;
+  margin-top: 10px;
+}
+
+.update-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.update-status {
+  margin: 8px 0;
+}
+
+#update-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.update-release {
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.update-release-head strong {
+  margin-right: 2px;
+}
+
+.update-release-head button {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.update-release-head button + button {
+  margin-left: 0;
+}
+
+.update-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+}
+
+.update-notes {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.update-auto {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 #size-panel {
   left: 50%;
   transform: translateX(-50%);
@@ -1259,4 +1346,9 @@ button.my-tool {
 .family-stats {
   display: grid;
   margin-top: 4px;
+}
+
+#update-get {
+  color: var(--accent);
+  border-color: var(--accent);
 }
