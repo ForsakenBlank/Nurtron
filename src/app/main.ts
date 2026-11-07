@@ -1225,7 +1225,7 @@ async function boot(): Promise<void> {
       whyClass = 'told';
     } else if (c.doing && decision) {
       const reason = c.brain.reason(decision, world.needs());
-      why = { learned: 'It learned this works', curious: 'Just curious', habit: 'Out of habit' }[reason];
+      why = { learned: 'It learned this works', planned: 'It worked out what this leads to', curious: 'Just curious', habit: 'Out of habit' }[reason];
       whyClass = reason;
     }
     const whyBox = $('now-why');

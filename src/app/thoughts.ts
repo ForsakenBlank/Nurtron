@@ -96,6 +96,22 @@ export class ThoughtLog {
         this.add(who, tick, event.name ? `Couldn't get to the ${event.name}, so it gave up` : 'Gave up', 'bad');
       } else if (event.type === 'taught') {
         this.add(who, tick, `Remembered doing that${event.name ? ` to the ${event.name}` : ''}`, 'good');
+      } else if (event.type === 'watched') {
+        const what = event.name ? ` the ${event.name}` : '';
+        const words = {
+          ate: `Saw another creature ${DOING[event.action]}${what}, and it helped them`,
+          hurt: `Saw another creature ${DOING[event.action]}${what}, and it went badly for them`,
+          petted: `Saw another creature get petted for trying to ${DOING[event.action]}${what}`,
+          slapped: `Saw another creature get slapped for trying to ${DOING[event.action]}${what}`,
+        }[event.what];
+        this.add(who, tick, words, event.what === 'ate' || event.what === 'petted' ? 'good' : 'bad');
+      } else if (event.type === 'replayed') {
+        this.add(who, tick, `Went over ${event.moments === 1 ? 'something' : `${event.moments} things`} that happened lately while resting`, 'plain');
+      } else if (event.type === 'noticed') {
+        this.add(who, tick, `Noticed the ${event.name} appear just after it tried to ${DOING[event.after]} the ${event.cause}`, 'plain');
+      } else if (event.type === 'planned') {
+        const then = event.steps.map((step) => `${DOING[step.action]} the ${describe(step.percept)}`).join(', then ');
+        this.add(who, tick, `Worked out what this leads to: after it, it could ${then}`, 'decide');
       }
     }
   }

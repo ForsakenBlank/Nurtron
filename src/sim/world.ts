@@ -1,7 +1,7 @@
 // the room and everything in it. nothing here knows about graphics, so it can run with no window,
 // thousands of times faster than real time.
-import { Brain, needsTarget } from './brain.ts';
-import type { Action, Decision, Genes } from './brain.ts';
+import { ACTIONS, Brain, needsTarget } from './brain.ts';
+import type { Action, Decision, Genes, PlanStep } from './brain.ts';
 import { Circuit } from './circuit.ts';
 import type { CreatureData } from './creature-file.ts';
 import type { Live, Wire } from './circuit.ts';
@@ -43,7 +43,7 @@ function roomSize(want?: { width: number; height: number }): RoomSize {
 }
 const DT = 1 / TICKS_PER_SECOND;
 const WALK_SPEED = 130;
-const SAVE_VERSION = 9;
+const SAVE_VERSION = 10;
 export const MOST_CREATURES = 20;
 const BABY_REST = 5 * 60 * TICKS_PER_SECOND; // a parent has to wait this long before having another
 const HATCH_SECONDS = 4;
@@ -259,7 +259,11 @@ export type WorldEvent =
   | { type: 'solved'; who: number | null; seconds: number; name: string }
   | { type: 'died'; who: number; lesson: string }
   | { type: 'revived'; who: number }
-  | { type: 'laid'; who: number };
+  | { type: 'laid'; who: number }
+  | { type: 'watched'; who: number; other: number; what: 'ate' | 'hurt' | 'petted' | 'slapped'; action: Action; name: string }
+  | { type: 'replayed'; who: number; moments: number }
+  | { type: 'noticed'; who: number; name: string; after: Action; cause: string }
+  | { type: 'planned'; who: number; steps: PlanStep[] };
 
 export interface WorldOptions {
   seed: number;
@@ -310,6 +314,8 @@ export class World {
   trial: TrialState | null = null;
   private zones: Thing[] = [];
   private routes = new Map<number, { at: number; step: RouteStep | null }>();
+  private visible = new Set<number>(); // what could be seen last tick, so something new coming into view gets noticed
+  private returned = new Set<number>(); // eaten things coming back this tick, which nothing did on purpose
   private effects: Effect[] = [];
   things: Thing[] = [];
   creatures: Creature[] = [];
@@ -1026,6 +1032,10 @@ export class World {
     }
     for (const r of this.respawns) r.spec = { ...r.spec, x: insideX(r.spec.x, 60), y: undefined };
     for (const c of this.creatures) {
+      for (const p of c.brain.places) {
+        p.x += shiftX;
+        p.y += shiftY;
+      }
       c.x = insideX(c.x, BODY.radius);
       c.y = Math.max(BODY.centreAboveFeet * 2, c.y + shiftY);
       c.lastX = c.x;
@@ -1238,6 +1248,8 @@ export class World {
   pet(c = this.creature): void {
     if (c.dead) return;
     c.brain.pet(this.tick, TICKS_PER_SECOND);
+    c.brain.notePlace(c.x, c.y - BODY.centreAboveFeet, 0.8);
+    this.othersSee(c, true);
     this.circuit.feel('petted', c.id);
     this.events.push({ type: 'petted', who: c.id });
   }
@@ -1245,12 +1257,27 @@ export class World {
   slap(c = this.creature): void {
     if (c.dead) return;
     c.brain.slap(this.tick, TICKS_PER_SECOND);
+    c.brain.notePlace(c.x, c.y - BODY.centreAboveFeet, -1);
+    this.othersSee(c, false);
     this.circuit.feel('slapped', c.id);
     this.events.push({ type: 'slapped', who: c.id });
     c.orders = []; // a slap means stop
     this.endAction(true, c);
     c.stunned = Math.round(0.8 * TICKS_PER_SECOND);
     if (!c.dragged) this.physics.knockCreature(c.id, -c.facing * 120, -170);
+  }
+
+  // a pet or slap seen by others teaches them about whatever this one had been doing
+  private othersSee(c: Creature, petted: boolean): void {
+    for (const w of this.watchers(c)) {
+      const channelOf = (theirs: number): number => w.brain.driveNames.indexOf(c.brain.driveNames[theirs]);
+      const seen = w.brain.watchedHand(c.brain, petted, channelOf, this.tick, TICKS_PER_SECOND);
+      for (const one of seen) w.brain.watched(this.seenBy(w, c, one.seen), one.action, one.lessons);
+      const newest = seen[seen.length - 1];
+      if (newest && w.brain.learning && w.brain.abilities.watching) {
+        this.events.push({ type: 'watched', who: w.id, other: c.id, what: petted ? 'petted' : 'slapped', action: ACTIONS[newest.action], name: newest.seen ? describeSeen(newest.seen) : '' });
+      }
+    }
   }
 
   step(): void {
@@ -1278,8 +1305,41 @@ export class World {
     } : null);
     this.stepRespawns();
     this.stepVoices();
+    this.noticeNew();
     this.keysTapped.clear();
     if (this.tick % TICKS_PER_SECOND === 0) for (const c of this.creatures) c.brain.drift(1);
+  }
+
+  // anything that has just come into view, like something a button made or a shape that was hidden being shown. each
+  // creature that can see it wonders whether what it just did caused it. a word in the air or an eaten fruit coming back
+  // by itself aren't things anyone did, so they're left out.
+  private noticeNew(): void {
+    const now = new Set<number>();
+    for (const t of this.things) if (!t.inBody && !t.voice && canSee(t)) now.add(t.id);
+    for (const id of now) {
+      if (this.visible.has(id) || this.returned.has(id)) continue;
+      const t = this.thing(id) as Thing;
+      for (const c of this.creatures) {
+        if (c.dead || c.hatching > 0 || c.hiddenAway) continue;
+        const near = closestPoint(t, c.x, c.y - BODY.centreAboveFeet);
+        if (Math.hypot(near.x - c.x, near.y - (c.y - BODY.centreAboveFeet)) > SENSE_RANGE) continue;
+        const cause = c.brain.noticeAppeared(this.perceive(t, c), this.tick, TICKS_PER_SECOND);
+        if (cause?.seen) this.events.push({ type: 'noticed', who: c.id, name: t.name, after: ACTIONS[cause.action], cause: describeSeen(cause.seen) });
+      }
+    }
+    this.visible = now;
+    this.returned.clear();
+  }
+
+  // other creatures close enough to see this one, who can learn from what happens to it
+  private watchers(actor: Creature): Creature[] {
+    if (actor.hiddenAway) return [];
+    return this.creatures.filter((w) => w.id !== actor.id && !w.dead && w.hatching === 0 && !w.hiddenAway && !w.dragged && Math.hypot(w.x - actor.x, w.y - actor.y) <= SENSE_RANGE);
+  }
+
+  // what the watcher saw the other one doing it to, as it looks from where the watcher is
+  private seenBy(w: Creature, actor: Creature, seen: Percept | null | undefined): Percept | null {
+    return seen ? { ...seen, near: nearnessOf(Math.hypot(w.x - actor.x, w.y - actor.y)) } : null;
   }
 
   private feelGravity(c: Creature): void {
@@ -1312,23 +1372,25 @@ export class World {
       const r = this.respawns[i];
       if (this.tick < r.at) continue;
       this.respawns.splice(i, 1);
-      this.bringBack(r, Math.max(60, Math.min(this.size.width - 60, r.spec.x + this.rng.range(-130, 130))));
+      const back = this.bringBack(r, Math.max(60, Math.min(this.size.width - 60, r.spec.x + this.rng.range(-130, 130))));
+      this.returned.add(back.id);
     }
   }
 
   // it's the same thing coming back, not a new one, so it's still wired up
-  private bringBack(r: Respawn, x: number): void {
+  private bringBack(r: Respawn, x: number): Thing {
     const fresh = this.add({ ...r.spec, x, y: this.size.floor - 340, angle: 0 }, r.id !== undefined && !this.thing(r.id) ? r.id : undefined);
     fresh.home = r.spec.x;
     for (const w of r.wires ?? []) {
       if (w.from === r.id) this.connect(fresh.id, w.out, w.to, w.in);
       else this.connect(w.from, w.out, fresh.id, w.in);
     }
+    return fresh;
   }
 
   // anything eaten comes back now, for when a room is about to be saved or kept
   finishRespawns(): void {
-    for (const r of this.respawns) this.bringBack(r, r.spec.x);
+    for (const r of this.respawns) this.returned.add(this.bringBack(r, r.spec.x).id);
     this.respawns = [];
   }
 
@@ -1364,14 +1426,20 @@ export class World {
       .filter((t) => !t.dragged && !c.cantReach[t.id] && canSee(t))
       .map((t) => {
         const near = closestPoint(t, c.x, bodyY);
-        return { id: t.id, percept: this.perceive(t, c), distance: Math.hypot(near.x - c.x, near.y - bodyY) / SENSE_RANGE };
+        return { id: t.id, percept: this.perceive(t, c), distance: Math.hypot(near.x - c.x, near.y - bodyY) / SENSE_RANGE, x: t.x, y: t.y };
       })
       .filter((t) => t.distance <= 1)
       .sort((a, b) => a.distance - b.distance)
       .slice(0, MOST_THINGS_NOTICED);
     const energy = this.drive('Energy', c);
-    const decision = c.brain.decide(things, this.needs(c), energy ? needOf(energy) : 0, c.holding !== null, this.tick, this.rng);
+    const needs = this.needs(c);
+    const decision = c.brain.decide(things, needs, energy ? needOf(energy) : 0, c.holding !== null, this.tick, this.rng);
     this.events.push({ type: 'decided', who: c.id, decision, told: false });
+    // if it's doing this for what it thinks will come of it, the chain it worked out goes in its thoughts
+    if (decision.chosen.percept && c.brain.reason(decision, needs) === 'planned') {
+      const steps = c.brain.planSteps(decision.chosen.percept, ACTIONS.indexOf(decision.action), needs);
+      if (steps.length) this.events.push({ type: 'planned', who: c.id, steps });
+    }
     this.start(c, decision.action, decision.chosen.thingId);
   }
 
@@ -1388,8 +1456,16 @@ export class World {
     // the worse it feels, the further it goes looking, so it can't starve just because the food is out of sight
     const roam = this.rng.range(1.5, 3) + this.worstNeed(c) * 7;
     const seconds = { approach: walkTime, avoid: 2, touch: walkTime, grab: walkTime, push: walkTime, drop: 0.3, rest: 3, call: 1, wander: roam }[action];
-    // it keeps heading the same way when it wanders, which covers ground far better than turning at random
-    if (action === 'wander' && this.rng.next() < 0.2) c.heading *= -1;
+    // it keeps heading the same way when it wanders, which covers ground far better than turning at random. somewhere it
+    // was hurt, it heads away. otherwise it often drifts back towards somewhere good things happened.
+    if (action === 'wander') {
+      const bodyY = c.y - BODY.centreAboveFeet;
+      const bad = c.brain.placeValue(c.x, bodyY) < -0.15 ? c.brain.worstNear(c.x, bodyY) : null;
+      const fav = bad ? null : c.brain.favourite();
+      if (bad) c.heading = c.x >= bad.x ? 1 : -1;
+      else if (fav && Math.abs(fav.x - c.x) > 150 && this.rng.next() < fav.value) c.heading = fav.x > c.x ? 1 : -1;
+      else if (this.rng.next() < 0.2) c.heading *= -1;
+    }
     if (c.floating) c.headingY = action === 'wander' ? this.rng.range(-0.8, 0.8) : 0;
     c.doing = {
       action,
@@ -1651,12 +1727,15 @@ export class World {
       if (doing.told) c.orders = [];
     }
     c.pause = Math.round(0.4 * TICKS_PER_SECOND);
+    const felt: { drive: string; amount: number }[] = [];
     for (const drive of c.drives) {
       const start = doing.needStart[drive.channel];
       if (drive.kind === 'nerve' || !drive.wired || start === undefined || start === null) continue;
       const change = start - needOf(drive);
       if (Math.abs(change) >= DRIVE_NOISE_FLOOR) {
         c.brain.rewardDrive(drive.channel, change * DRIVE_REWARD_GAIN, this.tick, TICKS_PER_SECOND);
+        c.brain.notePlace(c.x, c.y - BODY.centreAboveFeet, change * DRIVE_REWARD_GAIN);
+        felt.push({ drive: drive.name, amount: change * DRIVE_REWARD_GAIN });
         // whatever it was just hearing goes along with what happened, which is how a word comes to mean something
         for (const name in c.hearing) {
           const word = c.brain.driveNames.indexOf(name);
@@ -1664,11 +1743,36 @@ export class World {
         }
       }
     }
+    if (felt.length) this.othersSeeFelt(c, felt);
     if (completed && doing.told && doing.remember) {
       c.brain.teach();
       this.events.push({ type: 'taught', who: c.id, action: doing.action, name: what?.name ?? '' });
     }
     c.brain.finishAction(this.tick, completed);
+    // a rest is when it goes over what happened lately
+    if (completed && doing.action === 'rest') {
+      const moments = c.brain.replay(this.tick, TICKS_PER_SECOND);
+      if (moments > 0) this.events.push({ type: 'replayed', who: c.id, moments });
+    }
+  }
+
+  // others nearby saw what doing that did for this one, like eating, and learn a little about it too
+  private othersSeeFelt(c: Creature, felt: { drive: string; amount: number }[]): void {
+    const trace = c.brain.traces[c.brain.traces.length - 1];
+    if (!trace) return;
+    for (const w of this.watchers(c)) {
+      const lessons: { channel: number; amount: number }[] = [];
+      for (const f of felt) {
+        const channel = w.brain.driveNames.indexOf(f.drive);
+        if (channel >= 0 && w.brain.kinds[channel] === 'drive') lessons.push({ channel: channel + 1, amount: f.amount });
+      }
+      if (!lessons.length) continue;
+      w.brain.watched(this.seenBy(w, c, trace.seen), trace.action, lessons);
+      if (w.brain.learning && w.brain.abilities.watching) {
+        const good = lessons.reduce((sum, l) => sum + l.amount, 0) > 0;
+        this.events.push({ type: 'watched', who: w.id, other: c.id, what: good ? 'ate' : 'hurt', action: ACTIONS[trace.action], name: trace.seen ? describeSeen(trace.seen) : '' });
+      }
+    }
   }
 
   // stops what it's doing without it learning anything, for tests that set up a situation
@@ -1800,6 +1904,7 @@ function belongsInFile(t: Thing): boolean {
 }
 
 const wordChannel = (word: string): string => `"${word}"`;
+const describeSeen = (p: Percept): string => `${p.size} ${p.colour} ${p.shape}`;
 
 // old saves are brought up to date here, one version at a time, so nobody loses a creature to an update
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1812,8 +1917,18 @@ function migrate(saved: any): any {
   if (saved.version === 6) saved = { ...saved, version: 7, size: ROOM };
   if (saved.version === 7) saved = { ...saved, version: 8, gravity: { strength: 1, direction: 90 } };
   if (saved.version === 8) saved = { ...saved, version: 9 }; // Food turns into Hunger when it's opened, once the wires are there to change
+  if (saved.version === 9) saved = migrateV9(saved);
   if (saved.version !== SAVE_VERSION) throw new Error(`Save version ${saved.version} isn't one this build can read`);
   return saved;
+}
+
+// version 9 brains had no places, recent moments or idea of what makes what appear. they start with none, and fill
+// them up from what happens next, like a baby would
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function migrateV9(saved: any): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const creatures = saved.creatures.map((c: any) => ({ ...c, brain: { ...c.brain, episodes: [], places: [], effects: [] } }));
+  return { ...saved, version: 10, creatures };
 }
 
 // version 5 only ever had one creature, so everything inside was its

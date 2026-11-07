@@ -1,7 +1,7 @@
 // .nurt files: one creature, ready to send to a friend. it holds its brain, its body circuit, its look and its age.
 // as with every file, this is only data, so a stranger's creature can't do anything except be a creature.
-import { ACTIONS } from './brain.ts';
-import type { Brain, Concept } from './brain.ts';
+import { ACTIONS, needsTarget } from './brain.ts';
+import type { Brain, Concept, Effect } from './brain.ts';
 import { cleanFamily, cleanGenes } from './family.ts';
 import type { Kin } from './family.ts';
 import { cleanLook } from './look.ts';
@@ -16,6 +16,7 @@ const FILE_VERSION = 1;
 const MOST_CHANNELS = 24;
 const MOST_CONCEPTS = 256;
 const MOST_NAME = 40;
+const MOST_EFFECTS = 48;
 
 export type SavedBrain = ReturnType<Brain['save']>;
 
@@ -36,6 +37,8 @@ export interface CreatureData {
 }
 
 // short-term memories are left out: they say "what i did a moment ago", and a moment ago it was somewhere else.
+// so are the places it likes and dislikes, which are spots in this room, and the recent moments it goes over while
+// resting. what makes what appear goes with it, since that's about kinds of things, not where they were.
 // when it last used a concept is kept as how long ago, since a tick only means something inside one world.
 export function creatureData(world: World, c: Creature = world.creature): CreatureData {
   const brain = c.brain.save();
@@ -44,7 +47,7 @@ export function creatureData(world: World, c: Creature = world.creature): Creatu
     look: c.look,
     hatching: c.hatching,
     age: world.tick - c.bornTick,
-    brain: { ...brain, traces: [], concepts: brain.concepts.map((concept) => ({ ...concept, lastUsed: world.tick - concept.lastUsed })) },
+    brain: { ...brain, traces: [], episodes: [], places: [], concepts: brain.concepts.map((concept) => ({ ...concept, lastUsed: world.tick - concept.lastUsed })) },
     body: world.bodyData(c),
     uid: c.uid,
     parents: world.family[c.uid]?.parents ?? [],
@@ -134,5 +137,24 @@ function cleanBrain(raw: unknown): SavedBrain {
     decisions: number(b.decisions, 0, 0, 1e12),
     boredom: number(b.boredom, 0, 0, 1),
     mood: number(b.mood, 0, -1, 1),
+    episodes: [],
+    places: [],
+    effects: cleanEffects(b.effects),
   };
+}
+
+// anything that isn't a whole, sensible link between two kinds of thing is left out, rather than the creature refused,
+// since a creature from before milestone 8 has none at all
+function cleanEffects(raw: unknown): Effect[] {
+  if (!Array.isArray(raw)) return [];
+  const effects: Effect[] = [];
+  for (const one of raw.slice(0, MOST_EFFECTS)) {
+    const e = (one ?? {}) as Record<string, unknown>;
+    const cause = cleanPercept(e.cause);
+    const effect = cleanPercept(e.effect);
+    const action = e.action;
+    if (!cause || !effect || typeof action !== 'number' || !Number.isInteger(action) || !ACTIONS[action] || !needsTarget(ACTIONS[action])) continue;
+    effects.push({ cause, action, effect, strength: number(e.strength, 0, 0, 1) });
+  }
+  return effects;
 }

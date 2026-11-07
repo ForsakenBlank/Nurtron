@@ -299,8 +299,18 @@ describe('map sizes', () => {
     const world = new World({ seed: 8700, size: { width: 20000, height: 4000 } });
     expect(world.size.floor).toBe(3940);
     expect(world.creature.x).toBe(10000);
-    run(world, 20);
-    expect(world.creature.y).toBeGreaterThan(3900);
+    // it may be partway through a hop onto the rock at any given moment, so this checks the whole 20 seconds: never
+    // through the floor, and never higher than a jump above it
+    let low = Infinity;
+    let high = -Infinity;
+    for (let i = 0; i < 20 * TICKS_PER_SECOND; i++) {
+      world.step();
+      low = Math.min(low, world.creature.y);
+      high = Math.max(high, world.creature.y);
+    }
+    world.takeEvents();
+    expect(high).toBeLessThanOrEqual(3941);
+    expect(low).toBeGreaterThan(3940 - 200);
     expect(world.things.find((t) => t.name === 'Rock')?.y).toBeGreaterThan(3800);
     const copy = World.load(world.save());
     expect(copy.size.width).toBe(20000);
