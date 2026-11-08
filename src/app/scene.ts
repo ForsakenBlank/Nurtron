@@ -2,7 +2,7 @@
 import { Application, Container, Graphics, Rectangle, Text, Texture } from 'pixi.js';
 import type { Look } from '../sim/look.ts';
 import type { Colour } from '../sim/senses.ts';
-import { corners, localCorners } from '../sim/shapes.ts';
+import { boundingRadius, corners, localCorners } from '../sim/shapes.ts';
 import type { Form } from '../sim/shapes.ts';
 import { stageSize } from '../sim/family.ts';
 import { ROOM } from '../sim/world.ts';
@@ -26,6 +26,21 @@ const MAX_ZOOM = 10;
 const ZOOM_OUT_PAST_FIT = 0.5; // you can go on zooming out a bit after the whole room fits
 const GROUND_REACH = 200000; // the ground and walls carry on past the room this far, so you never see where it stops
 const LARGEST_PICTURE = 1024; // ours are never this big, so one claiming to be came from somewhere else
+const SKY_TOP = 0x0b0e1a;
+const SKY_LOW = 0x1e2438;
+const HILL_FAR = 0x1a2034;
+const HILL_NEAR = 0x1f2740;
+const GRASS = 0x5f9a72;
+const GRASS_DARK = 0x3d6b54;
+
+// what can be switched off in Settings, for slower computers or anyone who'd rather things were calmer
+export interface SceneOptions {
+  scenery: boolean; // sky, stars, hills and grass, instead of a plain grid
+  particles: boolean; // hearts, crumbs, dust and stars
+  shake: boolean; // the view shakes when you slap
+  intent: boolean; // a little bubble showing what it's going for, when that's far off
+}
+export const DEFAULT_SCENE_OPTIONS: SceneOptions = { scenery: true, particles: true, shake: true, intent: true };
 
 // how one creature is looking right now, which is only for drawing
 interface Face {
@@ -37,7 +52,7 @@ interface Face {
 }
 
 interface Particle {
-  kind: 'heart' | 'star' | 'crumb' | 'ring' | 'zzz';
+  kind: 'heart' | 'star' | 'crumb' | 'ring' | 'zzz' | 'puff';
   x: number;
   y: number;
   vx: number;
@@ -78,6 +93,9 @@ export interface Overlay {
 export class Scene {
   app = new Application();
   private root = new Container();
+  private sky = new Graphics();
+  private hillsFar = new Graphics(); // these two drift slower than the room as you look around, so it has some depth
+  private hillsNear = new Graphics();
   private backdrop = new Graphics();
   private bodyBackdrop = new Graphics();
   private pictureLayer = new Container();
@@ -93,6 +111,7 @@ export class Scene {
   private zPool: Text[] = [];
   private particles: Particle[] = [];
   playing = false; // the editor is out of the way, and this is a game now
+  options: SceneOptions = { ...DEFAULT_SCENE_OPTIONS };
   private voices = new Map<number, Text>();
   private faces = new Map<number, Face>();
   private tags = new Map<number, Text>();
@@ -118,7 +137,7 @@ export class Scene {
     // the host can change size without the window changing, like when the toolbar wraps onto a second line
     new ResizeObserver(() => this.app.resize()).observe(host);
     // parts hang on the wall behind everything, but wires go over the top so you can always see and click them
-    this.root.addChild(this.backdrop, this.bodyBackdrop, this.circuits.chips, this.pictureLayer, this.worldLayer, this.creatureLayer, this.circuits.wires, this.circuits.moving, this.fxLayer, this.overlayLayer, this.textLayer);
+    this.root.addChild(this.sky, this.hillsFar, this.hillsNear, this.backdrop, this.bodyBackdrop, this.circuits.chips, this.pictureLayer, this.worldLayer, this.creatureLayer, this.circuits.wires, this.circuits.moving, this.fxLayer, this.overlayLayer, this.textLayer);
     this.textLayer.addChild(this.angleLabel);
     this.app.stage.addChild(this.root);
     this.drawBackdrop();
@@ -129,7 +148,7 @@ export class Scene {
     if (view === this.view) return;
     const here = this.camera;
     this.view = view;
-    this.backdrop.visible = view === 'room';
+    for (const layer of [this.sky, this.hillsFar, this.hillsNear, this.backdrop]) layer.visible = view === 'room';
     this.bodyBackdrop.visible = view === 'body';
     for (const layer of [this.pictureLayer, this.worldLayer, this.creatureLayer, this.fxLayer]) layer.visible = view === 'room';
     if (this.otherCamera) {
@@ -151,6 +170,14 @@ export class Scene {
   // the canvas being looked at. the inside of a creature is the same size whatever the room is
   private get bounds(): { width: number; height: number; floor: number } {
     return this.view === 'body' ? ROOM : this.roomSize;
+  }
+
+  // the Settings changed. the backdrop is drawn once, so it's drawn again if it should look different
+  setOptions(options: SceneOptions): void {
+    const redraw = options.scenery !== this.options.scenery;
+    this.options = { ...options };
+    if (!options.particles) this.particles = this.particles.filter((p) => p.kind === 'zzz');
+    if (redraw) this.drawBackdrop();
   }
 
   // the room can change size, which means a new backdrop and new limits on where the camera can go
@@ -259,16 +286,63 @@ export class Scene {
 
   private drawBackdrop(): void {
     const { width, height, floor } = this.roomSize;
+    const fancy = this.options.scenery;
+    // the sky: deep at the top, a little lighter down by the ground, drawn as bands since it's only drawn once
+    const sky = this.sky.clear();
+    const top = Math.min(0, floor - 4000);
+    const bands = 32;
+    for (let i = 0; i < bands; i++) {
+      const y0 = top + ((floor - top) * i) / bands;
+      sky.rect(-GROUND_REACH, y0, GROUND_REACH * 2 + width, (floor - top) / bands + 1).fill(fancy ? mix(SKY_TOP, SKY_LOW, (i / (bands - 1)) ** 1.6) : 0x171a26);
+    }
+    if (fancy) {
+      // a few stars, the same ones every time for a room this size
+      const random = seeded(width * 7919 + height);
+      const stars = Math.min(1600, Math.round((width * height) / 9000));
+      for (let i = 0; i < stars; i++) {
+        const x = random() * width;
+        const y = random() * (floor - 120);
+        const glow = 0.15 + random() * 0.45 * (1 - y / floor);
+        sky.circle(x, y, random() < 0.08 ? 1.8 : 1).fill({ color: random() < 0.15 ? 0xcfe0ff : 0xffffff, alpha: glow });
+      }
+    }
+
+    // hills far away, past where the room ends on both sides, so moving them never shows an edge
+    this.hillsFar.clear();
+    this.hillsNear.clear();
+    if (fancy) {
+      hills(this.hillsFar, -width - 3000, width * 2 + 3000, floor, 260, 0.0021, HILL_FAR, seeded(width + 31));
+      hills(this.hillsNear, -width - 3000, width * 2 + 3000, floor, 150, 0.0042, HILL_NEAR, seeded(width + 97));
+    }
+
     // in a really big room, fine lines only add up to a grey blur
     const step = width > 8000 || height > 4000 ? 200 : 40;
     const g = this.backdrop.clear();
-    g.rect(0, 0, width, floor).fill(0x171a26);
+    if (!fancy) g.rect(0, 0, width, floor).fill(0x171a26);
     for (let x = 0; x <= width; x += step) g.moveTo(x, 0).lineTo(x, floor);
     for (let y = floor % step; y <= floor; y += step) g.moveTo(0, y).lineTo(width, y);
-    g.stroke({ width: step === 40 ? 1 : 2, color: 0x232738, alpha: 0.7 });
+    g.stroke({ width: step === 40 ? 1 : 2, color: fancy ? 0x2e3550 : 0x232738, alpha: fancy ? 0.35 : 0.7 });
     // the ground goes on for ever, below and to both sides
     g.rect(-GROUND_REACH, floor, GROUND_REACH * 2 + width, GROUND_REACH).fill(0x262b3e);
-    g.rect(-GROUND_REACH, floor, GROUND_REACH * 2 + width, 3).fill(0x3a4160);
+    if (fancy) {
+      // layers of earth, getting darker further down
+      for (let i = 1; i <= 4; i++) g.rect(-GROUND_REACH, floor + 10 + i * 14, GROUND_REACH * 2 + width, GROUND_REACH).fill({ color: 0x141724, alpha: 0.18 });
+      // little stones in the dirt, and tufts of grass along the top, only where the room is
+      const random = seeded(width * 13 + 5);
+      for (let x = -400; x < width + 400; x += 26 + random() * 40) {
+        const y = floor + 14 + random() * 44;
+        g.ellipse(x, y, 2 + random() * 3, 1.5 + random() * 2).fill({ color: 0x3a4160, alpha: 0.6 });
+      }
+      for (let x = -400; x < width + 400; x += 9 + random() * 16) {
+        const tall = 3 + random() * 7;
+        const lean = (random() - 0.5) * 5;
+        g.poly([x - 2.5, floor + 1, x + lean, floor - tall, x + 2.5, floor + 1]).fill(random() < 0.5 ? GRASS : GRASS_DARK);
+      }
+      g.rect(-GROUND_REACH, floor, GROUND_REACH * 2 + width, 4).fill(GRASS_DARK);
+      g.rect(-GROUND_REACH, floor, GROUND_REACH * 2 + width, 1.5).fill(GRASS);
+    } else {
+      g.rect(-GROUND_REACH, floor, GROUND_REACH * 2 + width, 3).fill(0x3a4160);
+    }
     // and the walls of the room show where it ends
     g.rect(-3, 0, 3, floor).fill(0x3a4160);
     g.rect(width, 0, 3, floor).fill(0x3a4160);
@@ -279,6 +353,10 @@ export class Scene {
     for (let x = 0; x <= ROOM.width; x += 40) b.moveTo(x, 0).lineTo(x, ROOM.height);
     for (let y = 0; y <= ROOM.height; y += 40) b.moveTo(0, y).lineTo(ROOM.width, y);
     b.stroke({ width: 1, color: 0x3a2636, alpha: 0.7 });
+    // soft glows, like the inside of something alive
+    for (const [x, y, r] of [[420, 300, 360], [1500, 640, 420], [1050, 140, 260]]) {
+      for (let i = 4; i >= 1; i--) b.circle(x, y, (r * i) / 4).fill({ color: 0x5a2a4a, alpha: 0.05 });
+    }
     this.bodyBackdrop.visible = this.view === 'body';
   }
 
@@ -316,8 +394,14 @@ export class Scene {
         for (let i = 0; i < 16; i++) this.spawn('crumb', headX, headY + 40, rand(-170, 170), rand(-260, -60), 0.8, rand(2.5, 5), c.look.belly);
       } else if (event.type === 'called') {
         for (let i = 0; i < 3; i++) this.spawn('ring', headX + c.facing * 16, headY + 26, 0, 0, 0.7 + i * 0.2, 8 + i * 8, c.look.belly);
+      } else if (event.type === 'cuddled') {
+        face.happy = 1;
+        const other = world.creatureById(event.other);
+        if (other) this.faceOf(other).happy = 1;
+        const midX = other ? (headX + this.faceOf(other).head.x) / 2 : headX;
+        for (let i = 0; i < 5; i++) this.spawn('heart', midX + rand(-14, 14), headY + 10, rand(-25, 25), rand(-80, -40), 1.2, rand(6, 10), 0xff9cc0);
       } else if (event.type === 'touched') {
-        if (event.ate) {
+        if (event.ate && !event.cuddle) {
           face.happy = Math.max(face.happy, 0.7);
           for (let i = 0; i < 10; i++) this.spawn('crumb', headX + c.facing * 22, headY + 34, rand(-90, 90), rand(-150, -30), 0.5, rand(2, 4), COLOURS.red);
         }
@@ -333,6 +417,7 @@ export class Scene {
   }
 
   private spawn(kind: Particle['kind'], x: number, y: number, vx: number, vy: number, life: number, size: number, colour: number): void {
+    if (!this.options.particles && kind !== 'zzz') return;
     if (this.particles.length > 150) this.particles.shift();
     this.particles.push({ kind, x, y, vx, vy, age: 0, life, size, colour });
   }
@@ -358,7 +443,11 @@ export class Scene {
 
     const cam = this.camera;
     this.root.scale.set(cam.zoom);
-    this.root.position.set(-cam.x * cam.zoom + Math.sin(this.time * 70) * 6 * this.shake, -cam.y * cam.zoom);
+    this.root.position.set(-cam.x * cam.zoom + Math.sin(this.time * 70) * 6 * this.shake * (this.options.shake ? 1 : 0), -cam.y * cam.zoom);
+    // further away things move less as you look around
+    const middle = cam.x + this.app.screen.width / cam.zoom / 2 - this.roomSize.width / 2;
+    this.hillsFar.position.x = middle * 0.6;
+    this.hillsNear.position.x = middle * 0.3;
 
     this.drawThings(world, glide, overlay);
     this.drawCreatures(world);
@@ -374,6 +463,16 @@ export class Scene {
   private drawThings(world: World, glide: number, overlay: Overlay): void {
     const g = this.worldLayer.clear();
     const doing = world.creature.doing;
+    // soft shadows on the floor under anything near it, drawn first so everything stands on them
+    const floor = this.roomSize.floor;
+    for (const t of world.things) {
+      if (t.inBody || t.voice || t.part || (t.hidden && this.playing)) continue;
+      const reach = boundingRadius(t);
+      const gap = floor - (t.y + reach);
+      if (gap > 160 || gap < -reach) continue;
+      const strength = Math.max(0, 1 - Math.max(0, gap) / 160) * (t.solid ? 0.32 : 0.15) * (t.hidden ? 0.4 : 1);
+      g.ellipse(t.x, floor + 2, Math.max(6, (t.form === 'circle' ? t.hw : Math.max(t.hw, t.hh)) * (1 - Math.max(0, gap) / 400)), 4).fill({ color: 0x000000, alpha: strength });
+    }
     const stillPainted = new Set<number>();
     const stillVoices = new Set<number>();
     for (const t of world.things) {
@@ -494,6 +593,8 @@ export class Scene {
     if (!painted) {
       this.shapePath(g, t.form, t.hw, t.hh, x, y, angle);
       g.fill({ color: colour, alpha: fade });
+      // a darker edge, so things stand out against the room and each other
+      if (Math.min(t.hw, t.hh) >= 5) g.stroke({ width: 2, color: darker(colour), alpha: 0.85 * fade, alignment: 1 });
       const spotX = -t.hw * 0.35;
       const spotY = -Math.min(t.hh, t.hw) * 0.35;
       const shine = Math.max(2, Math.min(t.hw, t.hh) * 0.26);
@@ -589,6 +690,13 @@ export class Scene {
   private drawCreatures(world: World): void {
     const g = this.creatureLayer.clear();
     for (const c of world.creatures) if (!c.hiddenAway) this.drawCreature(g, world, c);
+    // who the one you're looking at is going for, when it's another creature
+    const focused = world.creature;
+    const after = focused.doing ? world.creatureById(focused.doing.targetId ?? -1) : undefined;
+    if (after && !after.hiddenAway && this.view === 'room') {
+      const face = this.faceOf(after);
+      this.drawAttention(g, { form: 'circle', hw: 34, hh: 34 } as Thing, face.head.x, face.head.y - 30);
+    }
     // once there's more than one, you need to know who's who
     const many = world.creatures.length > 1 && this.view === 'room';
     const px = 1 / this.camera.zoom;
@@ -639,7 +747,7 @@ export class Scene {
     const floor = this.roomSize.floor;
     if (feetY > floor - 8) g.ellipse(x, floor + 3, (25 - (c.walking ? Math.abs(Math.sin(t * 11)) * 5 : 0)) * size, 4).fill({ color: 0x000000, alpha: 0.3 });
 
-    const target = world.thing(c.doing?.targetId ?? null);
+    const target = world.targetOf(c.doing?.targetId ?? null);
     const lookX = target ? Math.sign(target.x - x) || c.facing : c.facing;
     const lookY = target ? Math.max(-1, Math.min(1, (target.y - (feetY - 34)) / 120)) : 0;
 
@@ -680,6 +788,39 @@ export class Scene {
 
     // zzz, using pooled text so they don't get rebuilt
     if (resting && !this.still && Math.random() < 0.02) this.spawn('zzz', x + 24, feetY - 60, 12, -22, 1.8, 15, 0xc8d2ff);
+    // a little dust kicked up by its feet
+    if (c.walking && !c.floating && !c.climbing && !this.still && feetY > floor - 4 && Math.random() < 0.06 * (c.brain.genes.pace || 1)) {
+      this.spawn('puff', x - c.facing * 14, floor - 3, -c.facing * rand(10, 30), rand(-18, -6), 0.55, rand(3, 5), 0x8a90a3);
+    }
+    if (this.options.intent && !c.dead && !c.dragged && c.id === world.focusId) this.drawIntent(g, world, c, x, feetY - 84 * size);
+  }
+
+  // a thought bubble with a little picture of what it's going for, once that's far enough off to lose track of
+  private drawIntent(g: Graphics, world: World, c: Creature, x: number, top: number): void {
+    const doing = c.doing;
+    if (!doing || doing.targetId === null || doing.action === 'avoid') return;
+    const target = world.targetOf(doing.targetId);
+    if (!target || Math.hypot(target.x - c.x, target.y - c.y) < 260) return;
+    const other = world.creatureById(target.id);
+    const bx = x + 26;
+    const by = top - 14;
+    g.circle(x + 8, top + 4, 2.5).fill({ color: 0xffffff, alpha: 0.75 });
+    g.circle(x + 15, top - 3, 4).fill({ color: 0xffffff, alpha: 0.85 });
+    g.roundRect(bx - 18, by - 16, 36, 30, 12).fill({ color: 0xffffff, alpha: 0.92 });
+    if (other) {
+      // a heart for a cuddle, and a creature's own colour for anything else
+      const s = 6;
+      const hx = bx;
+      const hy = by - 2;
+      g.moveTo(hx, hy + s * 0.9)
+        .bezierCurveTo(hx - s * 1.4, hy - s * 0.1, hx - s * 0.6, hy - s * 1.1, hx, hy - s * 0.35)
+        .bezierCurveTo(hx + s * 0.6, hy - s * 1.1, hx + s * 1.4, hy - s * 0.1, hx, hy + s * 0.9)
+        .fill(doing.action === 'touch' ? 0xff7aa2 : other.look.body);
+      return;
+    }
+    const scale = 9 / Math.max(target.hw, target.hh, 1);
+    this.shapePath(g, target.form, target.hw * scale, target.hh * scale, bx, by - 1, target.angle);
+    g.fill(COLOURS[target.colour]).stroke({ width: 1.2, color: darker(COLOURS[target.colour]) });
   }
 
   private drawParticles(dt: number): void {
@@ -692,6 +833,10 @@ export class Scene {
       p.y += p.vy * dt;
       const left = 1 - p.age / p.life;
       if (p.kind === 'crumb' || p.kind === 'star') p.vy += 500 * dt;
+      if (p.kind === 'puff') {
+        g.circle(p.x, p.y, p.size * (1 + p.age * 3)).fill({ color: p.colour, alpha: left * 0.35 });
+        continue;
+      }
       if (p.kind === 'heart') {
         const s = p.size;
         g.moveTo(p.x, p.y + s * 0.7)
@@ -724,6 +869,11 @@ export function feeds(give: { drive: string; amount: number }): number {
   return give.drive.toLowerCase() === 'hunger' ? -give.amount : give.amount;
 }
 
+// the same colour, darker, for edges
+function darker(colour: number): number {
+  return mix(colour, 0x0b0e1a, 0.42);
+}
+
 // the same colour with most of the colour gone
 function faded(colour: number): number {
   const r = (colour >> 16) & 255;
@@ -736,4 +886,35 @@ function faded(colour: number): number {
 
 function rand(min: number, max: number): number {
   return min + Math.random() * (max - min);
+}
+
+// the same numbers every time from the same seed, so scenery doesn't change each time it's drawn
+function seeded(seed: number): () => number {
+  let a = Math.floor(seed) >>> 0 || 1;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// partway from one colour to another
+function mix(from: number, to: number, along: number): number {
+  const part = (at: number): number => Math.round(((from >> at) & 255) + (((to >> at) & 255) - ((from >> at) & 255)) * along) << at;
+  return part(16) | part(8) | part(0);
+}
+
+// a line of rolling hills standing on the floor, made of a few waves added together
+function hills(g: Graphics, from: number, to: number, floor: number, tall: number, often: number, colour: number, random: () => number): void {
+  const phases = [random() * 10, random() * 10, random() * 10];
+  const points: number[] = [from, floor + 2];
+  const step = Math.max(40, (to - from) / 2400);
+  for (let x = from; x <= to; x += step) {
+    const wave = Math.sin(x * often + phases[0]) * 0.5 + Math.sin(x * often * 2.3 + phases[1]) * 0.3 + Math.sin(x * often * 5.1 + phases[2]) * 0.2;
+    points.push(x, floor - tall * (0.55 + 0.45 * wave));
+  }
+  points.push(to, floor + 2);
+  g.poly(points).fill(colour);
 }

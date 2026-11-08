@@ -121,6 +121,8 @@ export function drawNurt(g: Graphics, pose: NurtPose, look: Look): void {
   const bodyColour = skin === 'cosmos' ? shade(look.body, 0.45) : look.body;
   bodyPath(g, skin, x, cy, rx, ry, baseY, t);
   g.fill(floats ? { color: bodyColour, alpha: 0.9 } : bodyColour);
+  // a soft darker edge, so it stands out from whatever is behind it
+  g.stroke({ width: 2, color: shade(bodyColour, 0.62), alpha: 0.55, alignment: 1 });
 
   markings(g, look, x, cy, rx, ry, t, facing);
 
