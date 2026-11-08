@@ -1,6 +1,6 @@
 // the update checker only reads what GitHub says about releases, and has to cope with anything it sends
 import { describe, expect, it } from 'vitest';
-import { compareVersions, parseReleases, RELEASES_PAGE, safePage, updateWords } from '../src/app/updates.ts';
+import { compareVersions, parseReleases, RELEASES_PAGE, safePage, updateWords, verbFor } from '../src/app/updates.ts';
 
 const release = (tag: string, extra: Record<string, unknown> = {}) => ({
   tag_name: tag,
@@ -43,5 +43,11 @@ describe('update checker', () => {
     expect(updateWords(list, '0.1.0').newer?.version).toBe('0.2.0');
     expect(updateWords(list, '0.2.0').newer).toBeNull();
     expect(updateWords([], '0.2.0').words).toBe('No versions are published yet.');
+  });
+
+  it('names what a version button does: newer updates, the same reinstalls, older goes back', () => {
+    expect(verbFor('0.3.0', '0.2.1')).toBe('Update');
+    expect(verbFor('v0.2.1', '0.2.1')).toBe('Reinstall');
+    expect(verbFor('0.2.0', '0.2.1')).toBe('Downgrade');
   });
 });

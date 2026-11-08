@@ -1,7 +1,9 @@
 // the desktop shell: one window showing the game. all game code lives in src/ and runs in the page.
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const https = require('node:https');
+const { execFileSync, spawn } = require('node:child_process');
 
 const devUrl = process.env.NURTRON_DEV_URL;
 const checkOut = process.env.NURTRON_CHECK_OUT;
@@ -19,7 +21,7 @@ function createWindow() {
     title: 'Nurtron',
     backgroundColor: '#12141d',
     icon: path.join(__dirname, '..', 'assets', 'icon.png'),
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(__dirname, 'preload.cjs') },
   });
   Menu.setApplicationMenu(null);
   // links open in the real browser, and only web pages: the update checker's download page is the main one
@@ -29,6 +31,167 @@ function createWindow() {
   });
   return win;
 }
+
+// ---- updates ----
+// the page asks GitHub which versions there are. installing one only ever happens when the player presses a button
+// for it and says yes: then this downloads that version's build for this computer from this game's own releases,
+// unpacks it next to the app folder and swaps the two, and Nurtron starts again. creatures and worlds are kept
+// in the app's data folder, which none of this touches. it works like the one in Prism.
+const UPDATE_REPO = 'ForsakenBlank/Nurtron';
+const UPDATE_ASSETS = { linux: 'Nurtron-linux-x64.tar.gz', win32: 'Nurtron-windows-x64.zip' };
+const DOWNLOADS = `https://github.com/${UPDATE_REPO}/releases/download/`;
+// github hands the download over to its file servers, and nowhere else is followed
+const DOWNLOAD_HOSTS = ['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'];
+let installing = false;
+
+function getJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'Nurtron', Accept: 'application/vnd.github+json' } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        if (res.statusCode === 404) return reject(new Error("GitHub doesn't have that version."));
+        if (res.statusCode !== 200) return reject(new Error(`GitHub answered ${res.statusCode}.`));
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (err) {
+          reject(err);
+        }
+      });
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+function fetchToFile(url, dest, onProgress, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    const where = new URL(url);
+    if (where.protocol !== 'https:' || !DOWNLOAD_HOSTS.includes(where.hostname)) return reject(new Error('That download pointed somewhere unexpected, so it was stopped.'));
+    if (redirects > 5) return reject(new Error('Too many redirects.'));
+    https.get(url, { headers: { 'User-Agent': 'Nurtron' } }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return resolve(fetchToFile(new URL(res.headers.location, url).toString(), dest, onProgress, redirects + 1));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`The download failed (${res.statusCode}).`));
+      }
+      const total = parseInt(res.headers['content-length'] || '0', 10);
+      let got = 0;
+      const out = fs.createWriteStream(dest);
+      res.on('data', (chunk) => {
+        got += chunk.length;
+        if (total) onProgress(got / total);
+      });
+      res.pipe(out);
+      out.on('finish', () => out.close(() => resolve(dest)));
+      out.on('error', reject);
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+// the folder the app runs from, like release/Nurtron-linux-x64
+const appFolder = () => path.dirname(process.execPath);
+
+function canWrite(dir) {
+  const probe = path.join(dir, `.nurtron-write-test-${process.pid}`);
+  try {
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// why this copy can't install versions itself, or null if it can
+function cantInstall() {
+  if (!UPDATE_ASSETS[process.platform]) return 'Installing from here works on Linux and Windows.';
+  if (!app.isPackaged) return "This is running from the code, so get the newest code with git instead. The pages below still work.";
+  if (!canWrite(appFolder())) return "Nurtron can't change its own folder, so download the version you want from its page instead.";
+  if (process.platform === 'linux' && !canWrite(path.dirname(appFolder()))) return "Nurtron can't change the folder it's in, so download the version you want from its page instead.";
+  return null;
+}
+
+// a swap leaves the old version next to the new one, so it's tidied away on the next start
+function cleanOldUpdates() {
+  if (!app.isPackaged || process.platform !== 'linux') return;
+  const parent = path.dirname(appFolder());
+  try {
+    for (const f of fs.readdirSync(parent)) {
+      if (f.startsWith('.nurtron-old-') || f.startsWith('.nurtron-update-')) fs.rmSync(path.join(parent, f), { recursive: true, force: true });
+    }
+  } catch {
+    // nothing to tidy
+  }
+}
+
+ipcMain.handle('update:info', () => ({ current: app.getVersion(), asset: UPDATE_ASSETS[process.platform] ?? null, cantInstall: cantInstall() }));
+
+ipcMain.handle('update:install', async (event, version) => {
+  const reason = cantInstall();
+  if (reason) throw new Error(reason);
+  if (typeof version !== 'string' || !/^\d+(\.\d+){0,3}$/.test(version)) throw new Error("That isn't a version number.");
+  if (installing) throw new Error('Already installing one.');
+  installing = true;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const send = (stage, frac) => {
+    if (win && !win.isDestroyed()) win.webContents.send('update:progress', { stage, percent: Math.round(frac * 100) });
+  };
+  try {
+    const rel = await getJson(`https://api.github.com/repos/${UPDATE_REPO}/releases/tags/v${version}`);
+    const name = UPDATE_ASSETS[process.platform];
+    const asset = (rel.assets || []).find((a) => a.name === name);
+    if (!asset || typeof asset.browser_download_url !== 'string' || !asset.browser_download_url.startsWith(DOWNLOADS)) throw new Error(`Version ${version} has no ${name}.`);
+    const parent = path.dirname(appFolder());
+    const linux = process.platform === 'linux';
+    const work = fs.mkdtempSync(linux ? path.join(parent, '.nurtron-update-') : path.join(app.getPath('temp'), 'nurtron-update-'));
+    const archive = path.join(work, name);
+    await fetchToFile(asset.browser_download_url, archive, (f) => send('download', f));
+    send('unpack', 1);
+    const unpacked = path.join(work, 'new');
+    fs.mkdirSync(unpacked);
+    if (linux) execFileSync('tar', ['-xzf', archive, '-C', unpacked], { stdio: 'ignore' });
+    else execFileSync('tar', ['-xf', archive, '-C', unpacked], { stdio: 'ignore', windowsHide: true });
+    // the archive holds one folder, like Nurtron-linux-x64
+    const entries = fs.readdirSync(unpacked);
+    const src = entries.length === 1 && fs.statSync(path.join(unpacked, entries[0])).isDirectory() ? path.join(unpacked, entries[0]) : unpacked;
+    const exe = path.join(src, path.basename(process.execPath));
+    if (!fs.existsSync(exe)) throw new Error("That download didn't have Nurtron in it, so nothing was changed.");
+    const dest = appFolder();
+    if (linux) {
+      // a running program keeps working from its moved files, so the folders can be swapped while it runs
+      const old = path.join(parent, `.nurtron-old-${Date.now()}`);
+      fs.renameSync(dest, old);
+      try {
+        fs.renameSync(src, dest);
+      } catch (err) {
+        fs.renameSync(old, dest);
+        throw err;
+      }
+      app.relaunch();
+    } else {
+      // windows locks a running program's files, so a little script copies them over once this has closed
+      const script = path.join(work, 'update.cmd');
+      fs.writeFileSync(script, [
+        '@echo off',
+        ':wait',
+        `tasklist /FI "PID eq ${process.pid}" | find "${process.pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)`,
+        `robocopy "${src}" "${dest}" /E /R:5 /W:1 /NFL /NDL /NJH /NJS /NP >nul`,
+        `start "" "${process.execPath}"`,
+        `rmdir /s /q "${work}"`,
+      ].join('\r\n'));
+      spawn('cmd.exe', ['/c', script], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    }
+    setTimeout(() => app.quit(), 300);
+    return true;
+  } catch (err) {
+    installing = false;
+    throw err;
+  }
+});
 
 // used by `npm run check-env`: opens the window for a few seconds, runs the graphics and physics check,
 // then opens the real game too, and saves what it found and a picture of each
@@ -159,6 +322,7 @@ async function runCheck(win) {
 }
 
 app.whenReady().then(() => {
+  cleanOldUpdates();
   const win = createWindow();
   if (checkOut) runCheck(win);
   else if (devUrl) win.loadURL(devUrl);

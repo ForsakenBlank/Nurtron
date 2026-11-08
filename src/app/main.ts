@@ -32,7 +32,7 @@ import { PackagePanel } from './package-panel.ts';
 import { readPicture } from './pictures.ts';
 import { PropertiesPanel } from './properties.ts';
 import { COLOURS, Scene } from './scene.ts';
-import { compareVersions, fetchReleases, safePage, updateWords } from './updates.ts';
+import { compareVersions, FIRST_WITH_INSTALLER, fetchReleases, installer, safePage, updateWords, verbFor } from './updates.ts';
 import type { Release } from './updates.ts';
 
 const SAVE_KEY = 'nurtron.world';
@@ -45,7 +45,7 @@ const SIZES = [
   { name: 'Huge', width: 24000, height: 5000 },
 ];
 const NEW_WORLD_SIZE = SIZES[1];
-const CURRENT_SAVE = 9;
+const CURRENT_SAVE = 10;
 const ROOM_STEP = { across: 1000, up: 500 };
 const SPEEDS = [0, 1, 4, 16];
 
@@ -320,13 +320,13 @@ async function boot(): Promise<void> {
         <span id="update-version"></span>
         <span class="update-actions">
           <button id="update-check">Check for updates</button>
-          <button id="update-get" class="accent" hidden>Open download page</button>
+          <button id="update-get" class="accent" hidden>Update now</button>
         </span>
       </div>
       <div class="muted update-status" id="update-status"></div>
       <div id="update-list"></div>
       <label class="update-auto"><input type="checkbox" id="update-auto" /> Check when Nurtron starts</label>
-      <div class="muted size-note">This only asks GitHub which versions there are. Nothing is downloaded or installed unless you open a page and do it yourself.</div>
+      <div class="muted size-note" id="update-note">This asks GitHub which versions there are. Nothing is downloaded or installed until you press a version's button and say yes.</div>
     </div>
     <div id="tool-menu" class="pop-menu" role="menu"></div>
     <div id="ask" role="alertdialog">
@@ -1430,9 +1430,18 @@ async function boot(): Promise<void> {
   };
   let updateBusy = false;
   let updateNewer: Release | null = null;
+  let updateReleases: Release[] = [];
+  const install = installer();
+  // what this copy can do: the desktop app says its own version and whether it can install, a browser can't
+  let updateInfo: { current: string; asset: string | null; cantInstall: string | null } = { current: __APP_VERSION__, asset: null, cantInstall: 'Installing works in the desktop app. In a browser, the pages below have the downloads.' };
   const openPage = (url: string): void => {
     window.open(safePage(url), '_blank', 'noopener');
   };
+  const canInstall = (r: Release): boolean => !!install && !updateInfo.cantInstall && !!updateInfo.asset && r.builds.includes(updateInfo.asset);
+  function setUpdateBusy(busy: boolean): void {
+    updateBusy = busy;
+    for (const b of updatePanel.querySelectorAll<HTMLButtonElement>('#update-check, #update-get, [data-install]')) b.disabled = busy;
+  }
   function renderReleases(releases: Release[]): void {
     const list = $('update-list');
     list.replaceChildren();
@@ -1454,7 +1463,7 @@ async function boot(): Promise<void> {
         head.appendChild(b);
       };
       if (i === 0) badge('NEWEST');
-      if (compareVersions(r.version, __APP_VERSION__) === 0) badge('INSTALLED');
+      if (compareVersions(r.version, updateInfo.current) === 0) badge('INSTALLED');
       const notes = document.createElement('div');
       notes.className = 'update-notes';
       notes.hidden = true;
@@ -1465,37 +1474,77 @@ async function boot(): Promise<void> {
         notes.hidden = !notes.hidden;
         toggle.textContent = notes.hidden ? 'What changed' : 'Hide';
       });
-      const page = document.createElement('button');
-      page.textContent = 'Download page';
-      page.addEventListener('click', () => openPage(r.page));
-      head.append(toggle, page);
+      head.appendChild(toggle);
+      if (canInstall(r)) {
+        const verb = verbFor(r.version, updateInfo.current);
+        const go = document.createElement('button');
+        go.textContent = verb;
+        go.dataset.install = r.version;
+        if (verb === 'Update') go.className = 'accent';
+        go.addEventListener('click', () => askToInstall(r));
+        head.appendChild(go);
+      } else {
+        const page = document.createElement('button');
+        page.textContent = 'Download page';
+        page.addEventListener('click', () => openPage(r.page));
+        head.appendChild(page);
+      }
       box.append(head, notes);
       list.appendChild(box);
     });
   }
+  // nothing is downloaded until the player has said yes to exactly this version
+  function askToInstall(r: Release): void {
+    if (updateBusy || !install) return;
+    const verb = verbFor(r.version, updateInfo.current);
+    const back = verb === 'Downgrade';
+    const oneWay = back && compareVersions(r.version, FIRST_WITH_INSTALLER) < 0 ? ` ${r.version} can't install versions itself, so coming back means downloading from GitHub.` : '';
+    const words = back
+      ? `Go back to Nurtron ${r.version}? It downloads it, closes, and opens again. Worlds made with newer versions might not open in an older one, so save your creatures to files first.${oneWay}`
+      : `${verb === 'Update' ? 'Update to' : 'Reinstall'} Nurtron ${r.version}? It downloads it, closes, and opens again. Your creatures and worlds are kept.`;
+    confirmReplace(words, back ? 'Go back' : verb, () => installVersion(r));
+  }
+  async function installVersion(r: Release): Promise<void> {
+    if (!install || updateBusy) return;
+    save(world);
+    setUpdateBusy(true);
+    const status = $('update-status');
+    status.textContent = `Getting ${r.version}…`;
+    const off = install.onProgress((p) => {
+      status.textContent = p.stage === 'download' ? `Downloading ${r.version}… ${p.percent}%` : `Installing ${r.version}…`;
+    });
+    try {
+      await install.install(r.version);
+      status.textContent = 'Restarting…';
+    } catch (err) {
+      status.textContent = `It didn't work, and nothing was changed: ${updateError(err)}`;
+      setUpdateBusy(false);
+    } finally {
+      off();
+    }
+  }
+  const updateError = (err: unknown): string => String((err as Error)?.message ?? err).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
   async function checkForUpdates(quiet: boolean): Promise<void> {
     if (updateBusy) return;
-    updateBusy = true;
-    const check = $<HTMLButtonElement>('update-check');
-    if (!quiet) {
-      check.disabled = true;
-      $('update-status').textContent = 'Asking GitHub…';
-    }
+    setUpdateBusy(true);
+    if (!quiet) $('update-status').textContent = 'Asking GitHub…';
     try {
-      const releases = await fetchReleases();
+      if (install) updateInfo = await install.info();
+      $('update-version').textContent = `Nurtron ${updateInfo.current}`;
+      updateReleases = await fetchReleases();
       updatePrefs.lastCheck = Date.now();
       saveUpdatePrefs();
-      const { words, newer } = updateWords(releases, __APP_VERSION__);
+      const { words, newer } = updateWords(updateReleases, updateInfo.current);
       updateNewer = newer;
-      $('update-status').textContent = words;
+      $('update-status').textContent = `${words}${updateInfo.cantInstall ? ` ${updateInfo.cantInstall}` : ''}`;
       $('update-get').hidden = !newer;
-      renderReleases(releases);
+      $('update-get').textContent = newer && canInstall(newer) ? 'Update now' : 'Open download page';
+      renderReleases(updateReleases);
       if (quiet && newer) toast(`Nurtron ${newer.version} is available. Files, then App updates.`);
     } catch (err) {
-      if (!quiet) $('update-status').textContent = `Couldn't check: ${(err as Error).message}`;
+      if (!quiet) $('update-status').textContent = `Couldn't check: ${updateError(err)}`;
     } finally {
-      updateBusy = false;
-      check.disabled = false;
+      setUpdateBusy(false);
     }
   }
   $('update-version').textContent = `Nurtron ${__APP_VERSION__}`;
@@ -1514,7 +1563,11 @@ async function boot(): Promise<void> {
     updatePanel.style.display = 'none';
   });
   $('update-check').addEventListener('click', () => checkForUpdates(false));
-  $('update-get').addEventListener('click', () => updateNewer && openPage(updateNewer.page));
+  $('update-get').addEventListener('click', () => {
+    if (!updateNewer) return;
+    if (canInstall(updateNewer)) askToInstall(updateNewer);
+    else openPage(updateNewer.page);
+  });
   if (updatePrefs.auto && Date.now() - updatePrefs.lastCheck > 20 * 3600 * 1000) window.setTimeout(() => checkForUpdates(true), 8000);
 
   $('revive').addEventListener('click', () => {

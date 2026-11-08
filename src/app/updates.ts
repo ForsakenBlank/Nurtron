@@ -1,5 +1,5 @@
-// is there a newer Nurtron? this only ever reads the list of releases from GitHub. it never downloads or runs
-// anything: when there's a newer one, the player can open its page and download it themselves.
+// is there a newer Nurtron? the list of versions comes from GitHub. in the desktop app, a version can also be installed,
+// newer or older, but only when the player presses its button and says yes. the desktop side does the installing.
 export const UPDATE_REPO = 'ForsakenBlank/Nurtron';
 export const RELEASES_PAGE = `https://github.com/${UPDATE_REPO}/releases`;
 const RELEASES_API = `https://api.github.com/repos/${UPDATE_REPO}/releases?per_page=30`;
@@ -58,6 +58,27 @@ export async function fetchReleases(): Promise<Release[]> {
 export function updateWords(releases: Release[], current: string): { words: string; newer: Release | null } {
   const newest = releases[0];
   if (!newest) return { words: 'No versions are published yet.', newer: null };
-  if (compareVersions(newest.version, current) > 0) return { words: `Version ${newest.version} is available. Open its page to download it. Your creatures and worlds stay as they are.`, newer: newest };
-  return { words: `You're up to date (${current}).`, newer: null };
+  if (compareVersions(newest.version, current) > 0) return { words: `Version ${newest.version} is available. Your creatures and worlds stay as they are.`, newer: newest };
+  return { words: `You're up to date (${current}). Older versions are listed if you want to go back.`, newer: null };
 }
+
+// what the desktop app offers. there's none in a browser, which only gets the download pages
+export interface Installer {
+  info(): Promise<{ current: string; asset: string | null; cantInstall: string | null }>;
+  install(version: string): Promise<boolean>;
+  onProgress(callback: (progress: { stage: string; percent: number }) => void): () => void;
+}
+
+export function installer(): Installer | null {
+  const bridge = (window as unknown as { nurtronApp?: { updates?: Installer } }).nurtronApp?.updates;
+  return bridge && typeof bridge.install === 'function' ? bridge : null;
+}
+
+// what pressing a version's button would do
+export function verbFor(version: string, current: string): 'Update' | 'Reinstall' | 'Downgrade' {
+  const c = compareVersions(version, current);
+  return c > 0 ? 'Update' : c === 0 ? 'Reinstall' : 'Downgrade';
+}
+
+// versions before this one can't install anything themselves, so going back to one is a one-way trip
+export const FIRST_WITH_INSTALLER = '0.2.1';
