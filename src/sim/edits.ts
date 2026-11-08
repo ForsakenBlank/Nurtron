@@ -24,6 +24,15 @@ interface Edit {
 export class History {
   private done: Edit[] = [];
   private undone: Edit[] = [];
+  onCommit: ((label: string) => void) | null = null; // told about each new edit, for the first steps guide
+
+  get canUndo(): boolean {
+    return this.done.length > 0;
+  }
+
+  get canRedo(): boolean {
+    return this.undone.length > 0;
+  }
 
   // call this before changing things. ids that don't exist yet are remembered as not existing
   capture(world: World, ids: Iterable<number>): Snapshot {
@@ -54,6 +63,7 @@ export class History {
     this.done.push(edit);
     if (this.done.length > MOST_EDITS) this.done.shift();
     this.undone = [];
+    this.onCommit?.(edit.label);
   }
 
   undo(world: World): string | null {

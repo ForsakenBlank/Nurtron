@@ -36,6 +36,9 @@ import { compareVersions, FIRST_WITH_INSTALLER, fetchReleases, installer, safePa
 import type { Release } from './updates.ts';
 import { summarise } from './world-preview.ts';
 import { indexedStore, WorldStore } from './worlds.ts';
+import { Minimap } from './minimap.ts';
+import { Guide } from './guide.ts';
+import { DEFAULT_SCENE_OPTIONS } from './scene.ts';
 import type { WorldEntry } from './worlds.ts';
 
 const SAVE_KEY = 'nurtron.world';
@@ -170,6 +173,7 @@ async function boot(): Promise<void> {
             <button id="save-world" title="Save the room and your creature together in one file.">Save world</button>
             <button id="open-world" title="Open a world file as a new world. The one you're in is kept on the main menu.">Open world</button>
             <button id="size-open" title="This world's size and gravity, or start a new one">World settings</button>
+            <button id="save-picture" title="Save what's in the window right now as a picture">Save a picture</button>
             <b>Trials</b>
             <button id="save-trial" title="Save this room as a Trial for a friend's creature to try. A Goal part says what counts as solving it, and a Start part says where creatures begin.">Save as Trial</button>
             <button id="open-trial" title="Try a friend's Trial. Your own room comes back afterwards.">Open Trial</button>
@@ -179,6 +183,7 @@ async function boot(): Promise<void> {
         </div>
         <button id="play" title="Run what you've built as a game, with the editor out of the way. Everything goes back when you stop.">Play</button>
         <button id="brain-toggle" title="Show or hide what your creature is thinking (Tab)">Mind</button>
+        <button id="help-open" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
         <span class="muted" id="speed-label">Speed</span>
         <div class="group" id="speeds"></div>
         <div class="egg-box">
@@ -205,12 +210,16 @@ async function boot(): Promise<void> {
             <button data-grow="down" aria-label="More room below">↓</button>
             <button data-grow="right" aria-label="More room to the right">→</button>
           </div>
+          <canvas id="minimap" class="room-only" title="The whole room. Click or drag to look somewhere. M hides it."></canvas>
+          <div id="guide" hidden></div>
+          <div id="paused-badge">Paused · Space carries on</div>
           <div id="zoom-box" class="group">
+            <button id="follow" class="room-only" title="Keep your creature in view as it moves (L)">Follow</button>
             <button id="zoom-out" title="Zoom out (-)" aria-label="Zoom out">−</button>
             <button id="zoom-fit" title="Show the whole room (0)">Fit</button>
             <button id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
           </div>
-          <div id="toast" role="status"></div>
+          <div id="toasts" role="status"></div>
           <div id="trial-banner">
             <div><b id="trial-name"></b> <span id="trial-time" class="muted"></span></div>
             <div id="trial-about" class="muted"></div>
@@ -356,6 +365,15 @@ async function boot(): Promise<void> {
             <div class="prop-heading">Starting up</div>
             <label class="update-auto"><input type="checkbox" id="pref-menu-start" /> Open this menu when Nurtron starts</label>
           </div>
+          <div class="settings-group">
+            <div class="prop-heading">How it looks</div>
+            <label class="update-auto"><input type="checkbox" id="pref-scenery" /> Sky, hills and grass, instead of a plain grid</label>
+            <label class="update-auto"><input type="checkbox" id="pref-particles" /> Hearts, crumbs, dust and sparkles</label>
+            <label class="update-auto"><input type="checkbox" id="pref-shake" /> Shake the view when you slap</label>
+            <label class="update-auto"><input type="checkbox" id="pref-intent" /> A thought bubble showing what your creature is going for</label>
+            <label class="update-auto"><input type="checkbox" id="pref-minimap" /> The map of the whole room in the corner (M)</label>
+            <div class="prop-actions"><button id="pref-guide">Show the first steps again</button></div>
+          </div>
           <div class="settings-group" id="update-panel">
             <div class="prop-heading">App updates</div>
             <div class="update-row">
@@ -374,6 +392,38 @@ async function boot(): Promise<void> {
       </div>
     </div>
     <div id="tool-menu" class="pop-menu" role="menu"></div>
+    <div id="help" role="dialog" aria-label="Keyboard shortcuts">
+      <div class="prop-head"><b>Keyboard shortcuts</b><button id="help-close" class="prop-close" aria-label="Close">✕</button></div>
+      <div class="help-grid">
+        <div class="prop-heading">Time and looking around</div>
+        <span class="keys"><kbd>Space</kbd></span><span>Pause, or carry on</span>
+        <span class="keys"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span><span>Normal speed, 4 times, 16 times</span>
+        <span class="keys"><kbd>F</kbd></span><span>Find your creature</span>
+        <span class="keys"><kbd>L</kbd></span><span>Follow your creature as it moves</span>
+        <span class="keys"><kbd>[</kbd> <kbd>]</kbd></span><span>Look at the previous or next creature</span>
+        <span class="keys"><kbd>0</kbd></span><span>See the whole room</span>
+        <span class="keys"><kbd>+</kbd> <kbd>−</kbd></span><span>Zoom in or out. Scrolling does too</span>
+        <span class="keys"><kbd>Arrows</kbd></span><span>Look around. Dragging empty space does too</span>
+        <span class="keys"><kbd>M</kbd></span><span>Show or hide the map of the room</span>
+        <span class="keys"><kbd>Tab</kbd></span><span>Show or hide its mind</span>
+        <div class="prop-heading">Your creature</div>
+        <span class="keys"><kbd>Click</kbd></span><span>Pet it</span>
+        <span class="keys"><kbd>Right-click</kbd></span><span>Slap it, or send it to whatever you right-clicked</span>
+        <span class="keys"><kbd>Double-click</kbd></span><span>Look inside it</span>
+        <div class="prop-heading">Building</div>
+        <span class="keys"><kbd>V</kbd> <kbd>W</kbd></span><span>The hand, and the wire tool</span>
+        <span class="keys"><kbd>C</kbd> <kbd>B</kbd> <kbd>T</kbd> <kbd>H</kbd> <kbd>P</kbd></span><span>Circle, square, triangle, hexagon, plank</span>
+        <span class="keys"><kbd>R</kbd></span><span>Rotate what's selected</span>
+        <span class="keys"><kbd>G</kbd></span><span>Package what's selected as a tool</span>
+        <span class="keys"><kbd>Delete</kbd></span><span>Remove what's selected</span>
+        <span class="keys"><kbd>Shift</kbd>+drag</span><span>Select several</span>
+        <span class="keys"><kbd>Ctrl</kbd>+<kbd>Z</kbd> <kbd>Y</kbd></span><span>Undo, redo</span>
+        <span class="keys"><kbd>Ctrl</kbd>+<kbd>C</kbd> <kbd>V</kbd> <kbd>D</kbd></span><span>Copy, paste, duplicate</span>
+        <span class="keys"><kbd>Ctrl</kbd>+<kbd>A</kbd></span><span>Select everything</span>
+        <span class="keys"><kbd>Esc</kbd></span><span>Put the tool down, let go, or stop playing</span>
+        <span class="keys"><kbd>?</kbd></span><span>This list</span>
+      </div>
+    </div>
     <div id="ask" role="alertdialog">
       <div id="ask-words"></div>
       <div class="prop-actions">
@@ -415,14 +465,34 @@ async function boot(): Promise<void> {
     let shownFocus = world.focusId;
   const thoughts = new ThoughtLog();
   let learnedKey = '';
-  let toastTimer = 0;
-
+  // messages stack up for a moment instead of replacing each other, so two at once can both be read
+  const toasts = new Map<string, { el: HTMLElement; timer: number }>();
   function toast(text: string): void {
-    const el = $('toast');
+    const box = $('toasts');
+    const seen = toasts.get(text);
+    if (seen) {
+      // the same thing again just stays up a bit longer
+      clearTimeout(seen.timer);
+      seen.timer = window.setTimeout(() => dismissToast(text), toastTime(text));
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'toast';
     el.textContent = text;
-    el.classList.add('on');
-    clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => el.classList.remove('on'), 2600);
+    box.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('on'));
+    toasts.set(text, { el, timer: window.setTimeout(() => dismissToast(text), toastTime(text)) });
+    while (toasts.size > 3) dismissToast(toasts.keys().next().value as string);
+  }
+  // longer messages get longer to read
+  const toastTime = (text: string): number => Math.min(7000, 2200 + text.length * 35);
+  function dismissToast(text: string): void {
+    const one = toasts.get(text);
+    if (!one) return;
+    toasts.delete(text);
+    clearTimeout(one.timer);
+    one.el.classList.remove('on');
+    window.setTimeout(() => one.el.remove(), 250);
   }
 
   // showing and hiding its mind, and how wide it is. this belongs to you, not the world, so it stays whatever you open.
@@ -1195,7 +1265,15 @@ async function boot(): Promise<void> {
       const known = links.length ? links.map((l) => escapeHtml(l.words)).join('<br>') : "It hasn't learned anything about this yet.";
       showTooltip(e, `<b>${escapeHtml(thing.name)}</b>${known}`);
     } else if (onCreature) {
-      showTooltip(e, `<b>${escapeHtml(onCreature.name)}</b>Click to pet, right-click to slap, drag to carry.<br>A pet or a slap teaches it about what it just did.`);
+      const doing = escapeHtml(doingNow(onCreature, world.targetOf(onCreature.doing?.targetId ?? null)?.name ?? null));
+      // what the one you're looking at has learned about creatures that look like this one
+      let thinks = '';
+      if (onCreature.id !== world.focusId) {
+        const c = brain.closest(world.perceiveCreature(onCreature, world.creature));
+        const links = c === null ? [] : brain.linksOf(c).slice(0, 2);
+        thinks = `<br>${links.length ? `${escapeHtml(world.creature.name)} has learned: ${links.map((l) => escapeHtml(l.words)).join('; ')}` : `${escapeHtml(world.creature.name)} hasn't learned anything about them yet.`}`;
+      }
+      showTooltip(e, `<b>${escapeHtml(onCreature.name)}</b>${doing}.${thinks}<br><span class="muted">Click to pet, right-click to slap, drag to carry. A pet or a slap teaches it about what it just did.</span>`);
     } else {
       tooltip.style.display = 'none';
     }
@@ -1252,14 +1330,86 @@ async function boot(): Promise<void> {
     }
     const index = ['Digit1', 'Digit2', 'Digit3'].indexOf(e.code);
     if (index >= 0) setSpeed(SPEEDS[index + 1]);
+    if (playingFrom) return;
+    if (e.key === '?') toggleHelp();
+    else if (e.key === 'Escape' && helpBox.style.display === 'block') toggleHelp();
+    else if (e.code === 'KeyL' && !editor.inBody) setFollowing(!following);
+    else if (e.code === 'KeyM') {
+      prefs.minimap = !prefs.minimap;
+      savePrefs();
+      applyPrefs();
+      toast(prefs.minimap ? 'The map is back. M hides it.' : 'Map hidden. M brings it back.');
+    } else if (e.code === 'BracketLeft' || e.code === 'BracketRight') cycleCreature(e.code === 'BracketRight' ? 1 : -1);
+  });
+
+  // the next or previous creature, in the order they're in on the roster
+  function cycleCreature(by: number): void {
+    const list = world.creatures.filter((c) => !c.hiddenAway);
+    if (list.length < 2) return toast('There is only one creature here.');
+    const at = list.findIndex((c) => c.id === world.focusId);
+    const next = list[(at + by + list.length) % list.length];
+    editor.focusOn(next.id);
+    if (!editor.inBody && !following) scene.centreOn(next.x, next.y);
+  }
+
+  // the list of keys
+  const helpBox = $('help');
+  helpBox.addEventListener('pointerdown', (e) => e.stopPropagation());
+  function toggleHelp(): void {
+    helpBox.style.display = helpBox.style.display === 'block' ? 'none' : 'block';
+  }
+  $('help-open').addEventListener('click', toggleHelp);
+  $('help-close').addEventListener('click', toggleHelp);
+
+  // the view keeps up with your creature until you look somewhere else yourself
+  let following = false;
+  let pansWhenFollowing = 0;
+  function setFollowing(on: boolean): void {
+    following = on;
+    pansWhenFollowing = scene.pans;
+    minimap.moved = false;
+    $('follow').classList.toggle('on', on);
+    if (on) toast(`Following ${world.creature.name}. Move the view yourself to stop.`);
+  }
+  $('follow').addEventListener('click', () => setFollowing(!following));
+
+  // the map of the whole room
+  const minimap = new Minimap($<HTMLCanvasElement>('minimap'), scene, () => world);
+
+  // the first steps, which tick themselves off
+  const guide = new Guide($('guide'), localStorage, toast);
+  editor.history.onCommit = (label) => {
+    if (/^Add (circle|square|triangle|hexagon|plank)$/.test(label)) guide.mark('shape');
+    else if (label === 'Connect wire') guide.mark('wire');
+  };
+
+  // a picture of whatever's in the window, to keep or show someone
+  $('save-picture').addEventListener('click', async () => {
+    try {
+      const canvas = scene.app.renderer.extract.canvas(scene.app.stage) as HTMLCanvasElement;
+      const blob = await new Promise<Blob | null>((done) => canvas.toBlob(done, 'image/png'));
+      if (!blob) throw new Error('no picture');
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = fileName(`${world.creature.name} ${new Date().toISOString().slice(0, 10)}`, '.png');
+      link.click();
+      URL.revokeObjectURL(link.href);
+      toast('Picture saved.');
+    } catch {
+      toast("The picture couldn't be made.");
+    }
   });
 
   // what shows on screen
   const barsBox = $('bars');
-  const barRows = new Map<string, { el: HTMLElement; fill: HTMLElement; value: HTMLElement }>();
+  const barRows = new Map<string, { el: HTMLElement; fill: HTMLElement; value: HTMLElement; trend: HTMLElement; samples: { tick: number; need: number; value: number }[] }>();
   function renderHud(): void {
     const c = world.creature;
     const shown = c.drives.filter((d) => d.kind === 'drive' && d.wired);
+    if (barsBox.dataset.who !== String(c.id)) {
+      barsBox.dataset.who = String(c.id);
+      for (const row of barRows.values()) row.samples.length = 0;
+    }
     for (const [name, row] of barRows) {
       if (shown.some((d) => d.name === name)) continue;
       row.el.remove();
@@ -1270,10 +1420,25 @@ async function boot(): Promise<void> {
       if (!row) {
         const el = document.createElement('div');
         el.className = 'bar-row';
-        el.innerHTML = `<span>${escapeHtml(drive.name)}</span><div class="bar"><i></i></div><span></span>`;
+        el.innerHTML = `<span>${escapeHtml(drive.name)}</span><div class="bar"><i></i></div><span></span><b class="trend"></b>`;
         barsBox.appendChild(el);
-        row = { el, fill: el.querySelector('i') as HTMLElement, value: el.lastElementChild as HTMLElement };
+        row = { el, fill: el.querySelector('i') as HTMLElement, value: el.children[2] as HTMLElement, trend: el.lastElementChild as HTMLElement, samples: [] };
         barRows.set(drive.name, row);
+      }
+      // which way it's heading over the last few seconds of its life, whatever speed the world is going
+      const samples = row.samples;
+      if (!samples.length || samples[samples.length - 1].tick !== world.tick) samples.push({ tick: world.tick, need: needOf(drive), value: drive.value / drive.scale });
+      while (samples.length > 2 && world.tick - samples[1].tick > 3 * TICKS_PER_SECOND) samples.shift();
+      if (samples.length && samples[0].tick > world.tick) samples.length = 0; // a different creature, or a different world
+      // the arrow goes the way the bar is going, and its colour says whether that's good
+      const first = samples[0];
+      const last = samples[samples.length - 1];
+      const moved = samples.length > 1 ? last.value - first.value : 0;
+      const arrow = Math.abs(moved) < 0.015 ? '' : moved > 0 ? '▲' : '▼';
+      const worse = samples.length > 1 && last.need > first.need;
+      if (row.trend.textContent !== arrow || row.trend.classList.contains('worse') !== worse) {
+        row.trend.textContent = arrow;
+        row.trend.className = `trend ${worse ? 'worse' : 'better'}`;
       }
       const level = Math.max(0, Math.min(1, drive.value / drive.scale));
       const need = needOf(drive);
@@ -1619,13 +1784,18 @@ async function boot(): Promise<void> {
   if (updatePrefs.auto && Date.now() - updatePrefs.lastCheck > 20 * 3600 * 1000) window.setTimeout(() => checkForUpdates(true), 8000);
 
   // ---- the main menu: worlds, and settings ----
-  const prefs = ((): { menuAtStart: boolean } => {
+  // everything here is on unless it was switched off, so a new setting starts on for everyone
+  const PREF_NAMES = ['menuAtStart', 'scenery', 'particles', 'shake', 'intent', 'minimap'] as const;
+  type Prefs = Record<(typeof PREF_NAMES)[number], boolean>;
+  const prefs = ((): Prefs => {
+    const all = Object.fromEntries(PREF_NAMES.map((name) => [name, true])) as Prefs;
     try {
-      const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as { menuAtStart?: unknown };
-      return { menuAtStart: saved.menuAtStart !== false };
+      const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Record<string, unknown>;
+      for (const name of PREF_NAMES) all[name] = saved[name] !== false;
     } catch {
-      return { menuAtStart: true };
+      // all on, then
     }
+    return all;
   })();
   const savePrefs = (): void => {
     try {
@@ -1661,8 +1831,15 @@ async function boot(): Promise<void> {
       store.keep(id, world.save(), summarise(world)).then(renderWorlds, (err) => console.error('Could not keep the world', err));
     }
   }
+  // the window says which world you're in
+  function syncTitle(): void {
+    const name = store.list().find((entry) => entry.id === store.activeId)?.name;
+    document.title = name ? `${name} · Nurtron` : 'Nurtron';
+  }
+
   function closeMenu(): void {
     if (!store.activeId) return toast('Choose a world, or make a new one, first.');
+    syncTitle();
     inMenu = false;
     menu.style.display = 'none';
     $('menu-new-form').hidden = true;
@@ -1723,6 +1900,7 @@ async function boot(): Promise<void> {
   };
 
   function renderWorlds(): void {
+    syncTitle();
     const grid = $('world-grid');
     grid.replaceChildren();
     $('menu-continue').hidden = !store.activeId;
@@ -1848,10 +2026,25 @@ async function boot(): Promise<void> {
   $('menu-open').addEventListener('click', () => openMenu());
   $('menu-tab-worlds').addEventListener('click', () => showTab('worlds'));
   $('menu-tab-settings').addEventListener('click', () => showTab('settings'));
-  $<HTMLInputElement>('pref-menu-start').checked = prefs.menuAtStart;
-  $<HTMLInputElement>('pref-menu-start').addEventListener('change', (e) => {
-    prefs.menuAtStart = (e.target as HTMLInputElement).checked;
-    savePrefs();
+  function applyPrefs(): void {
+    scene.setOptions({ ...DEFAULT_SCENE_OPTIONS, scenery: prefs.scenery, particles: prefs.particles, shake: prefs.shake, intent: prefs.intent });
+    $('app').classList.toggle('no-minimap', !prefs.minimap);
+    for (const name of PREF_NAMES) {
+      const box = $<HTMLInputElement>(name === 'menuAtStart' ? 'pref-menu-start' : `pref-${name}`);
+      box.checked = prefs[name];
+    }
+  }
+  for (const name of PREF_NAMES) {
+    $<HTMLInputElement>(name === 'menuAtStart' ? 'pref-menu-start' : `pref-${name}`).addEventListener('change', (e) => {
+      prefs[name] = (e.target as HTMLInputElement).checked;
+      savePrefs();
+      applyPrefs();
+    });
+  }
+  applyPrefs();
+  $('pref-guide').addEventListener('click', () => {
+    guide.restart();
+    toast('The first steps are back, in the corner of the room.');
   });
   // only the desktop app has a window of its own to close
   if (installer()) {
@@ -1906,6 +2099,9 @@ async function boot(): Promise<void> {
     for (let i = 0; i < steps; i++) world.step();
     const events = world.takeEvents();
     for (const event of events) {
+      if (event.type === 'petted') guide.mark('pet');
+      else if (event.type === 'touched' && event.ate && !event.cuddle) guide.mark('eat');
+      else if (event.type === 'decided' && event.told && event.decision.chosen.percept) guide.mark('tell');
       if (event.type === 'died') {
         const c = world.creatureById(event.who);
         if (c) toast(`${c.name} has died. ${event.who === world.focusId ? event.lesson : 'Click them to see what went wrong.'}`);
@@ -1925,6 +2121,11 @@ async function boot(): Promise<void> {
     if (playingFrom) {
       const target = world.cameraTarget();
       if (target) scene.follow(target.x, target.y, target.zoom, dt);
+    } else if (following && !editor.inBody) {
+      // looking somewhere else yourself means you've stopped following
+      if (scene.pans !== pansWhenFollowing || minimap.moved) setFollowing(false);
+      // a little low in the view, the way F shows it, so there's room above to see what it's going for
+      else if (!world.creature.hiddenAway) scene.follow(world.creature.x, world.creature.y - scene.viewRect().height * 0.22, scene.zoom, dt);
     }
     if (world.focusId !== shownFocus) syncFocus();
     scene.handle(events, world);
@@ -1939,6 +2140,12 @@ async function boot(): Promise<void> {
       renderRoster();
       family.refresh();
       renderTrial();
+      if (prefs.minimap && !editor.inBody && !playingFrom) minimap.draw();
+      $('paused-badge').classList.toggle('on', speed === 0 && !inMenu && !playingFrom);
+      $<HTMLButtonElement>('undo').disabled = !editor.history.canUndo;
+      $<HTMLButtonElement>('redo').disabled = !editor.history.canRedo;
+      if (editor.inBody) guide.mark('inside');
+      if (speed > 1) guide.mark('speed');
       if (panelState.open) {
         renderNow();
         renderThoughts();

@@ -253,7 +253,22 @@ export class Scene {
     this.clampCamera();
   }
 
+  // the part of the room in the window right now
+  viewRect(): { x: number; y: number; width: number; height: number } {
+    return { x: this.camera.x, y: this.camera.y, width: this.app.screen.width / this.camera.zoom, height: this.app.screen.height / this.camera.zoom };
+  }
+
+  // puts this spot right in the middle of the window
+  lookAt(x: number, y: number): void {
+    this.camera.x = x - this.app.screen.width / this.camera.zoom / 2;
+    this.camera.y = y - this.app.screen.height / this.camera.zoom / 2;
+    this.clampCamera();
+  }
+
+  pans = 0; // goes up each time you move the view yourself, so following a creature knows to stop
+
   pan(screenDx: number, screenDy: number): void {
+    this.pans++;
     this.camera.x -= screenDx / this.camera.zoom;
     this.camera.y -= screenDy / this.camera.zoom;
     this.clampCamera();
