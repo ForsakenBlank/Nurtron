@@ -1290,7 +1290,7 @@ async function boot(): Promise<void> {
   function renderNow(): void {
     const c = world.creature;
     const decision = lastDecision;
-    const target = world.thing(c.doing?.targetId ?? null);
+    const target = world.targetOf(c.doing?.targetId ?? null);
     const seen = decision?.chosen.percept && c.doing && decision.chosen.thingId === c.doing.targetId ? describe(decision.chosen.percept) : (target?.name ?? null);
     setText('now-doing', doingNow(c, seen));
 
@@ -1916,7 +1916,7 @@ async function boot(): Promise<void> {
         toast('A loop was stopped: the wires in red never settle. A pulse wired to a Label fixes that.');
       }
     }
-    thoughts.take(events, world.tick, world.creatures.map((c) => c.id));
+    thoughts.take(events, world.tick, world.creatures.map((c) => c.id), new Map(world.creatures.map((c) => [c.id, c.name])));
     notesThisFrame = 0;
     for (const event of events) {
       if (event.type === 'sound') playNote(event.pitch, event.seconds);

@@ -17,7 +17,7 @@ import { JUMP_RISE, LEAP_SPEED, planRoute } from './navigate.ts';
 import type { Ledge, RouteStep } from './navigate.ts';
 import { BODY, GRAVITY, Physics } from './physics.ts';
 import { Rng } from './rng.ts';
-import { nearnessOf, sizeOf } from './senses.ts';
+import { colourFamily, nearnessOf, sizeOf } from './senses.ts';
 import type { Colour, Percept, Shape } from './senses.ts';
 import { areaOf, boundingRadius, closestPoint, containsPoint } from './shapes.ts';
 import type { Form } from './shapes.ts';
@@ -58,6 +58,7 @@ const HEARING_TICKS = 8 * TICKS_PER_SECOND; // and how long it stays on its mind
 const EARSHOT = 2000;
 const MOST_CHANNELS_WITH_WORDS = 48;
 const ROUTE_EVERY = 12; // ticks between working out the way again
+const WALL_MARGIN = 120; // this close to the edge of the room, wandering turns back
 
 // a drive only teaches when something changed it by more than this during an action. the slow tick down of
 // hunger is left out completely: it says nothing about what the creature just did, and counting it
@@ -225,6 +226,7 @@ export interface Creature {
   stuck: number;
   lastX: number;
   cantReach: Record<number, number>; // things it couldn't get to, and when it'll try again
+  blockedAt: Record<number, { x: number; y: number }>; // where each of those was, so it tries again once one has moved
   bornTick: number;
   hearing: Record<string, number>; // words it heard just now, and when it stops thinking about them
   wantVy: number;
@@ -238,12 +240,13 @@ export interface Creature {
   doing: Doing | null;
   pause: number;
   stunned: number;
+  shoved?: number; // ticks left being knocked along by someone else's push
   holding: number | null;
   brain: Brain;
 }
 
 export type WorldEvent =
-  | { type: 'touched'; who: number; thingId: number; name: string; ate: boolean; fatal: boolean }
+  | { type: 'touched'; who: number; thingId: number; name: string; ate: boolean; fatal: boolean; cuddle?: boolean }
   | { type: 'petted'; who: number }
   | { type: 'slapped'; who: number }
   | { type: 'called'; who: number }
@@ -263,7 +266,8 @@ export type WorldEvent =
   | { type: 'watched'; who: number; other: number; what: 'ate' | 'hurt' | 'petted' | 'slapped'; action: Action; name: string }
   | { type: 'replayed'; who: number; moments: number }
   | { type: 'noticed'; who: number; name: string; after: Action; cause: string }
-  | { type: 'planned'; who: number; steps: PlanStep[] };
+  | { type: 'planned'; who: number; steps: PlanStep[] }
+  | { type: 'cuddled'; who: number; other: number };
 
 export interface WorldOptions {
   seed: number;
@@ -409,6 +413,7 @@ export class World {
       stuck: 0,
       lastX: x,
       cantReach: {},
+      blockedAt: {},
       bornTick: this.tick,
       drives: [],
       doing: null,
@@ -493,6 +498,16 @@ export class World {
     this.syncSockets();
   }
 
+  // a Loneliness from before cuddles only went down when petted. if it's still wired the way it came, cuddling helps too
+  private learnToCuddle(c: Creature): void {
+    const inside = this.circuit.allParts.filter((t) => t.owner === c.id && t.stat === 'loneliness');
+    const feel = inside.find((t) => t.part?.kind === 'feel');
+    const comfort = inside.find((t) => t.part?.kind === 'give' && t.name === 'Comforted');
+    if (!feel || !comfort) return;
+    const wired = (port: string): boolean => this.wires.some((w) => w.from === feel.id && w.out === port && w.to === comfort.id);
+    if (wired('petted') && !this.wires.some((w) => w.from === feel.id && w.out === 'cuddled')) this.connect(feel.id, 'cuddled', comfort.id, 'give');
+  }
+
   // why these two can't have a baby right now, or null if they can
   whyNoBaby(a: Creature, b: Creature): string | null {
     if (a.id === b.id) return 'It takes two.';
@@ -550,6 +565,7 @@ export class World {
     if (!c || this.creatures.length < 2) return false;
     c.doing = null;
     if (c.holding !== null) this.dropHeld(c);
+    for (const other of this.creatures) if (other.id !== id && other.doing?.targetId === id) this.endAction(true, other);
     for (const t of this.things.filter((thing) => thing.owner === id)) this.remove(t.id);
     this.creatures = this.creatures.filter((other) => other.id !== id);
     this.physics.removeCreature(id);
@@ -1156,6 +1172,8 @@ export class World {
   }
 
   perceive(thing: Thing, c = this.creature): Percept {
+    const other = this.index.has(thing.id) ? undefined : this.creatureById(thing.id);
+    if (other) return this.perceiveCreature(other, c);
     const here = closestPoint(thing, c.x, c.y - BODY.centreAboveFeet);
     return {
       shape: this.shapeOf(thing),
@@ -1164,6 +1182,35 @@ export class World {
       moving: Math.abs(thing.vx) > 8 || Math.abs(thing.vy) > 8 || thing.dragged,
       near: nearnessOf(Math.hypot(here.x - c.x, here.y - (c.y - BODY.centreAboveFeet))),
     };
+  }
+
+  // another creature looks like a creature of its colour. it never sees its name, only what it looks like, so two
+  // creatures the same colour are the same to it until it gets to know them
+  perceiveCreature(other: Creature, c = this.creature): Percept {
+    const body = other.look.body;
+    return {
+      shape: 'creature',
+      colour: colourFamily((body >> 16) & 255, (body >> 8) & 255, body & 255),
+      size: 'medium',
+      moving: other.walking || other.dragged,
+      near: nearnessOf(Math.max(0, Math.hypot(other.x - c.x, other.y - c.y) - BODY.radius)),
+    };
+  }
+
+  // something it can go to: a thing, or another creature it can see. a creature is stood in for by a circle where
+  // its body is, so walking, jumping and reaching all work the same way
+  targetOf(id: number | null): Thing | undefined {
+    const thing = this.thing(id);
+    if (thing || id === null) return thing;
+    const other = this.creatureById(id);
+    if (!other || other.dead || other.hatching > 0 || other.hiddenAway) return undefined;
+    return { ...PROPERTY_DEFAULTS, id: other.id, name: other.name, form: 'circle', colour: 'grey', hw: BODY.radius, hh: BODY.radius, x: other.x, y: other.y - BODY.centreAboveFeet, vx: 0, vy: 0, spin: 0, heldBy: false, dragged: other.dragged, home: other.x };
+  }
+
+  // other creatures it could see from here, for deciding what to do
+  private othersInSight(c: Creature): Creature[] {
+    if (c.brain.abilities.social === false) return [];
+    return this.creatures.filter((o) => o.id !== c.id && !o.dead && o.hatching === 0 && !o.hiddenAway && !o.dragged && Math.hypot(o.x - c.x, o.y - c.y) <= SENSE_RANGE);
   }
 
   private shapeOf(thing: Thing): Shape {
@@ -1177,7 +1224,8 @@ export class World {
   // orders in the order you gave them. says why not if this can never work.
   tell(action: Action, targetId: number | null, remember = true, c = this.creature): string | null {
     if (c.dead) return `${c.name} is dead. Bring them back first.`;
-    if (needsTarget(action) && !this.thing(targetId)) return 'That needs something to do it to.';
+    if (needsTarget(action) && !this.targetOf(targetId)) return 'That needs something to do it to.';
+    if (action === 'grab' && this.creatureById(targetId ?? -1)) return "It can't carry another creature.";
     if (!needsTarget(action)) targetId = null;
     c.orders.push({ action, targetId, remember });
     if (c.doing && !c.doing.told) {
@@ -1197,7 +1245,7 @@ export class World {
   private nextOrder(c: Creature): boolean {
     while (c.orders.length > 0) {
       const order = c.orders.shift() as Order;
-      const target = this.thing(order.targetId);
+      const target = this.targetOf(order.targetId);
       if (needsTarget(order.action) && !target) continue;
       const percept = target ? this.perceive(target, c) : null;
       if (!c.brain.allowed(order.action, percept, c.holding !== null)) continue;
@@ -1412,6 +1460,11 @@ export class World {
       c.wantVx = null; // leave it flying from the slap
       return;
     }
+    if (c.shoved) {
+      c.shoved--;
+      c.wantVx = null; // and from a push, though it carries on with what it was doing once it lands
+      return;
+    }
     if (!c.doing) {
       if (--c.pause <= 0 && !this.nextOrder(c)) this.think(c);
       return;
@@ -1421,13 +1474,27 @@ export class World {
 
   private think(c: Creature): void {
     const bodyY = c.y - BODY.centreAboveFeet;
-    for (const id in c.cantReach) if (c.cantReach[id] <= this.tick) delete c.cantReach[id];
+    c.blockedAt ??= {};
+    for (const id in c.cantReach) {
+      // something it couldn't get to that has since moved might be easy to get to now
+      const was = c.blockedAt[id];
+      const now = this.targetOf(Number(id));
+      const moved = was && now && Math.hypot(now.x - was.x, now.y - was.y) > 120;
+      if (c.cantReach[id] <= this.tick || moved) {
+        delete c.cantReach[id];
+        delete c.blockedAt[id];
+      }
+    }
+    const others = this.othersInSight(c)
+      .filter((o) => !c.cantReach[o.id])
+      .map((o) => ({ id: o.id, percept: this.perceiveCreature(o, c), distance: Math.max(0, Math.hypot(o.x - c.x, o.y - c.y) - BODY.radius) / SENSE_RANGE, x: o.x, y: o.y - BODY.centreAboveFeet }));
     const things = this.things
       .filter((t) => !t.dragged && !c.cantReach[t.id] && canSee(t))
       .map((t) => {
         const near = closestPoint(t, c.x, bodyY);
         return { id: t.id, percept: this.perceive(t, c), distance: Math.hypot(near.x - c.x, near.y - bodyY) / SENSE_RANGE, x: t.x, y: t.y };
       })
+      .concat(others)
       .filter((t) => t.distance <= 1)
       .sort((a, b) => a.distance - b.distance)
       .slice(0, MOST_THINGS_NOTICED);
@@ -1444,14 +1511,14 @@ export class World {
   }
 
   private secondsToReach(c: Creature, targetId: number | null): number {
-    const target = this.thing(targetId);
+    const target = this.targetOf(targetId);
     if (!target) return 3;
     return Math.min(20, Math.abs(target.x - c.x) / (WALK_SPEED * c.brain.genes.pace) + 3);
   }
 
   private start(c: Creature, action: Action, targetId: number | null, order?: Order): void {
     // left to itself it gives up on a long walk. told to go, it keeps going however far it is
-    const target = this.thing(targetId);
+    const target = this.targetOf(targetId);
     const walkTime = order && target ? Math.abs(target.x - c.x) / (WALK_SPEED * c.brain.genes.pace) + 5 : this.secondsToReach(c, targetId);
     // the worse it feels, the further it goes looking, so it can't starve just because the food is out of sight
     const roam = this.rng.range(1.5, 3) + this.worstNeed(c) * 7;
@@ -1465,6 +1532,9 @@ export class World {
       if (bad) c.heading = c.x >= bad.x ? 1 : -1;
       else if (fav && Math.abs(fav.x - c.x) > 150 && this.rng.next() < fav.value) c.heading = fav.x > c.x ? 1 : -1;
       else if (this.rng.next() < 0.2) c.heading *= -1;
+      // there's nothing to find by walking into a wall, so near one it sets off the other way
+      if (c.x < WALL_MARGIN && c.heading < 0) c.heading = 1;
+      else if (c.x > this.size.width - WALL_MARGIN && c.heading > 0) c.heading = -1;
     }
     if (c.floating) c.headingY = action === 'wander' ? this.rng.range(-0.8, 0.8) : 0;
     c.doing = {
@@ -1490,7 +1560,7 @@ export class World {
 
   private act(c: Creature, doing: Doing): void {
     if (needsTarget(doing.action)) {
-      const target = this.thing(doing.targetId);
+      const target = this.targetOf(doing.targetId);
       // the only thing it can do to something it's carrying is touch it, which is how it eats it
       if (!target || (target.heldBy && doing.action !== 'touch')) return this.endAction(true, c);
       const bodyY = c.y - BODY.centreAboveFeet;
@@ -1653,6 +1723,15 @@ export class World {
   }
 
   private reach(c: Creature, doing: Doing, target: Thing): void {
+    const other = this.index.has(target.id) ? undefined : this.creatureById(target.id);
+    if (other) {
+      if (doing.action === 'touch') this.cuddle(c, other);
+      else if (doing.action === 'push' && !other.dragged) {
+        this.physics.knockCreature(other.id, c.facing * 220, -150);
+        other.shoved = Math.round(0.4 * TICKS_PER_SECOND);
+      }
+      return this.endAction(true, c);
+    }
     if (doing.action === 'touch') {
       this.touched(c, target);
     } else if (doing.action === 'push') {
@@ -1672,6 +1751,22 @@ export class World {
       }
     }
     this.endAction(true, c);
+  }
+
+  // touching another creature is a cuddle, which both of them can feel. it happens right now, like any touch, so
+  // whatever it does for this one counts for the action that's just finishing
+  private cuddle(c: Creature, other: Creature): void {
+    const before = this.needs(c);
+    this.circuit.feel('cuddled', other.id);
+    this.circuit.feelNow('cuddled', c.id);
+    this.circuit.takeCaused(c.id);
+    this.readDrives(c, true);
+    let helped = false;
+    for (const drive of c.drives) if (drive.kind === 'drive' && needOf(drive) < before[drive.channel]) helped = true;
+    c.facing = Math.sign(other.x - c.x) || c.facing;
+    if (!other.doing && !other.dragged) other.facing = Math.sign(c.x - other.x) || other.facing;
+    this.events.push({ type: 'touched', who: c.id, thingId: other.id, name: other.name, ate: helped, fatal: c.dead, cuddle: true });
+    this.events.push({ type: 'cuddled', who: c.id, other: other.id });
   }
 
   // everything a touch sets off happens right now, so it counts for the action that's just finishing
@@ -1719,8 +1814,11 @@ export class World {
     c.doing = null;
     c.leap = null;
     // it remembers it couldn't get there, so it tries something else instead of walking into the same wall
-    const what = this.thing(doing.targetId);
-    if (!completed && doing.targetId !== null) c.cantReach[doing.targetId] = this.tick + FORGET_BLOCKED_AFTER;
+    const what = this.targetOf(doing.targetId);
+    if (!completed && doing.targetId !== null) {
+      c.cantReach[doing.targetId] = this.tick + FORGET_BLOCKED_AFTER;
+      if (what) (c.blockedAt ??= {})[doing.targetId] = { x: what.x, y: what.y };
+    }
     if (!completed) {
       this.events.push({ type: 'gaveUp', who: c.id, action: doing.action, name: what?.name ?? '' });
       // the rest of what you told it probably depended on this
@@ -1840,7 +1938,7 @@ export class World {
     // cantReach and heading arrived partway through an old version, so a save may not have them yet
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     for (const c of saved.creatures as any[]) {
-      const creature: Creature = { ...c, look: cleanLook(c.look), hatching: c.hatching ?? 0, cantReach: c.cantReach ?? {}, heading: c.heading ?? 1, orders: c.orders ?? [], hearing: c.hearing ?? {}, wantVy: 0, floating: false, climbing: false, hopSpeed: 430, leap: null, hiddenAway: false, field: null, headingY: 0, dead: c.dead ?? false, deaths: c.deaths ?? 0, lastDeath: c.lastDeath ?? null, dragged: false, brain: Brain.load(c.brain) };
+      const creature: Creature = { ...c, look: cleanLook(c.look), hatching: c.hatching ?? 0, cantReach: c.cantReach ?? {}, blockedAt: c.blockedAt ?? {}, heading: c.heading ?? 1, orders: c.orders ?? [], hearing: c.hearing ?? {}, wantVy: 0, floating: false, climbing: false, hopSpeed: 430, leap: null, hiddenAway: false, field: null, headingY: 0, dead: c.dead ?? false, deaths: c.deaths ?? 0, lastDeath: c.lastDeath ?? null, dragged: false, brain: Brain.load(c.brain) };
       world.creatures.push(creature);
       world.physics.addCreature(creature.id, creature.x, creature.y);
       world.physics.placeCreature(creature.id, creature.x, creature.y);
@@ -1852,7 +1950,10 @@ export class World {
     if (saved.starterValues) world.addRoom(starterBody(100 - saved.starterValues.food, saved.starterValues.energy));
     world.syncSockets();
     world.syncZones();
-    for (const c of world.creatures) world.modernise(c);
+    for (const c of world.creatures) {
+      world.modernise(c);
+      world.learnToCuddle(c);
+    }
     return world;
   }
 
@@ -1879,6 +1980,7 @@ export class World {
     this.addRoom(data.body);
     this.syncSockets();
     this.modernise(c);
+    this.learnToCuddle(c);
     if (replacing) this.removeCreature(replacing.id);
     this.focusId = c.id;
     this.physics.wakeAll();

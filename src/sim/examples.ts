@@ -29,7 +29,7 @@ export const STAT_INFO: Record<StatId, { title: string; help: string; needs?: St
   health: { title: 'Health', help: 'Slaps hurt it, and it slowly heals. By itself, nothing happens at 0.' },
   mortal: { title: 'Dies at 0 Health', help: 'It dies when Health reaches 0, and you can revive it.', needs: 'health' },
   happiness: { title: 'Happiness', help: 'Pets raise it, slaps lower it, and it slowly fades.' },
-  loneliness: { title: 'Loneliness', help: 'Goes up by itself, and a pet brings it down.' },
+  loneliness: { title: 'Loneliness', help: 'Goes up by itself. A pet, or cuddling up to another creature, brings it down.' },
 };
 
 // a value that climbs by itself, or falls if step is below zero, and a socket that makes the creature care about it
@@ -119,6 +119,7 @@ export function statBlock(stat: StatId, hunger = 45, energy = 90): RoomData {
         wires: [
           { from: 0, out: 'value', to: 1, in: 'value' },
           { from: 2, out: 'petted', to: 3, in: 'give' },
+          { from: 2, out: 'cuddled', to: 3, in: 'give' },
           { from: 4, out: 'tick', to: 5, in: 'give' },
         ],
       };

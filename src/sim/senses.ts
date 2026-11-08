@@ -1,7 +1,8 @@
 // how a creature sees the world. it never sees names or pixels, only what a thing is like,
 // which is why what it learns still works on things and in rooms it has never met.
 
-export const SHAPES = ['circle', 'square', 'triangle', 'hexagon', 'bar'] as const;
+// a creature is a shape of its own to another creature, since nothing else looks like one
+export const SHAPES = ['circle', 'square', 'triangle', 'hexagon', 'bar', 'creature'] as const;
 export const COLOURS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'grey'] as const;
 export const SIZES = ['small', 'medium', 'big'] as const;
 export const NEARNESS = ['close', 'nearby', 'far'] as const;

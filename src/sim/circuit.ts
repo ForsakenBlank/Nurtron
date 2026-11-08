@@ -215,8 +215,14 @@ export class Circuit {
     this.drain();
   }
 
-  feel(port: 'petted' | 'slapped' | 'died' | 'revived', who: number): void {
+  feel(port: 'petted' | 'slapped' | 'died' | 'revived' | 'cuddled', who: number): void {
     for (const t of this.parts) if (t.part?.kind === 'feel' && t.owner === who) this.queue.push({ id: t.id, port, who });
+  }
+
+  // the same, but it all happens right now, so whatever it changes counts for the action that's just finishing
+  feelNow(port: 'cuddled', who: number): void {
+    this.feel(port, who);
+    this.drain();
   }
 
   actionStarted(action: string, who: number): void {

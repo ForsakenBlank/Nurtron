@@ -187,6 +187,7 @@ export interface Abilities {
   replay: boolean;
   places: boolean;
   planSteps: number; // 0 for no planning at all
+  social?: boolean; // notices other creatures as things it can go to. on unless it's false
 }
 
 export interface Link {
@@ -220,7 +221,7 @@ export class Brain {
   mood = 0; // -1 awful to 1 great, drawn on its face
   learning = true; // tests switch this off to watch without changing anything
   // what every new or opened brain starts with. tests change this to compare a creature with and without one of them
-  static defaults: Abilities = { watching: true, replay: true, places: true, planSteps: PLAN_STEPS };
+  static defaults: Abilities = { watching: true, replay: true, places: true, planSteps: PLAN_STEPS, social: true };
   abilities: Abilities = { ...Brain.defaults };
   episodes: Episode[] = [];
   places: Place[] = [];
@@ -525,7 +526,7 @@ export class Brain {
 
   allowed(action: Action, percept: Percept | null, holding: boolean): boolean {
     if (needsTarget(action) !== (percept !== null)) return false;
-    if (action === 'grab' && holding) return false;
+    if (action === 'grab' && (holding || percept?.shape === 'creature')) return false; // nobody gets carried off
     if (action === 'drop' && !holding) return false;
     return true;
   }

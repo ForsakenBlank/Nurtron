@@ -62,7 +62,7 @@ export class ThoughtLog {
     this.byCreature.set(id, list);
   }
 
-  take(events: WorldEvent[], tick: number, everyone: number[]): void {
+  take(events: WorldEvent[], tick: number, everyone: number[], names: Map<number, string> = new Map()): void {
     for (const event of events) {
       if (event.type === 'said') {
         if (event.by !== null) this.add(event.by, tick, `Said "${event.word}"`, 'good');
@@ -76,8 +76,11 @@ export class ThoughtLog {
         const verb = DOING[event.decision.action];
         this.add(who, tick, event.told ? `You told it to ${verb}${what}` : `Decided to ${verb}${what}`, event.told ? 'told' : 'decide');
       } else if (event.type === 'touched') {
-        if (event.fatal) continue; // the line about dying already says so
+        if (event.fatal || event.cuddle) continue; // the line about dying, or cuddling, already says so
         this.add(who, tick, event.ate ? `Touched the ${event.name}, and that helped` : `Touched the ${event.name}. Nothing much happened`, event.ate ? 'good' : 'plain');
+      } else if (event.type === 'cuddled') {
+        this.add(who, tick, `Cuddled up to ${names.get(event.other) ?? 'another creature'}`, 'good');
+        this.add(event.other, tick, `${names.get(who) ?? 'Another creature'} cuddled up to it`, 'good');
       } else if (event.type === 'petted') {
         this.add(who, tick, 'You petted it', 'good');
       } else if (event.type === 'slapped') {
