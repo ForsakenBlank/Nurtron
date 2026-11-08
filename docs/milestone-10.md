@@ -53,7 +53,8 @@ All of these can be switched off in **Settings, How it looks**, along with the s
 - **A lonely creature goes for company** 100% of the time after 3 cuddles, and 50% with none, against a rock (12 creatures, seeds 9201 and up).
 - **The learning bar** (seeds 1001 to 1100) still passes: 86%, 100%, 78%, 9%, 100%, 100%, 90%, 100%. Before this milestone it was 88%, 100%, 79%, 9%, 100%, 100%, 90%, 100%. The small changes come from wandering turning back at the walls.
 - **`npm run life`**, an hour alone, looks the same as before: it eats 12 to 17 times every 10 minutes, and the hungriest it got was 63.
-- **The desktop app check passed** under a virtual screen. Running as root, Electron has to be started with `--no-sandbox`, which `npm run check-env` doesn't do, so it was run by hand.
+- **`npm run check-env` passed** under a virtual screen. Electron won't start as root without `--no-sandbox`, so the check now adds that when it's run as root.
+- **The header stays on one line** from 1000 wide and up. The new ? button had pushed New egg onto a second line on some window sizes.
 
 ## Not checked
 
