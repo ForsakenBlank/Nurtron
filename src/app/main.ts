@@ -37,6 +37,7 @@ import type { Release } from './updates.ts';
 import { summarise } from './world-preview.ts';
 import { indexedStore, WorldStore } from './worlds.ts';
 import { Minimap } from './minimap.ts';
+import { Sounds } from './sfx.ts';
 import { Guide } from './guide.ts';
 import { DEFAULT_SCENE_OPTIONS } from './scene.ts';
 import type { WorldEntry } from './worlds.ts';
@@ -372,6 +373,7 @@ async function boot(): Promise<void> {
             <label class="update-auto"><input type="checkbox" id="pref-shake" /> Shake the view when you slap</label>
             <label class="update-auto"><input type="checkbox" id="pref-intent" /> A thought bubble showing what your creature is going for</label>
             <label class="update-auto"><input type="checkbox" id="pref-minimap" /> The map of the whole room in the corner (M)</label>
+            <label class="update-auto"><input type="checkbox" id="pref-sounds" /> Little sounds when things happen to your creatures <input type="range" id="pref-volume" min="0" max="1" step="0.05" aria-label="How loud" title="How loud" /></label>
             <div class="prop-actions"><button id="pref-guide">Show the first steps again</button></div>
           </div>
           <div class="settings-group" id="update-panel">
@@ -1373,6 +1375,16 @@ async function boot(): Promise<void> {
   }
   $('follow').addEventListener('click', () => setFollowing(!following));
 
+  // little sounds, for what happens to creatures you can see
+  const sounds = new Sounds();
+  const heard = (who: number): boolean => {
+    if (who === world.focusId) return true;
+    const c = world.creatureById(who);
+    if (!c || editor.inBody) return false;
+    const view = scene.viewRect();
+    return c.x > view.x - 100 && c.x < view.x + view.width + 100 && c.y > view.y - 100 && c.y < view.y + view.height + 200;
+  };
+
   // the map of the whole room
   const minimap = new Minimap($<HTMLCanvasElement>('minimap'), scene, () => world);
 
@@ -1785,7 +1797,7 @@ async function boot(): Promise<void> {
 
   // ---- the main menu: worlds, and settings ----
   // everything here is on unless it was switched off, so a new setting starts on for everyone
-  const PREF_NAMES = ['menuAtStart', 'scenery', 'particles', 'shake', 'intent', 'minimap'] as const;
+  const PREF_NAMES = ['menuAtStart', 'scenery', 'particles', 'shake', 'intent', 'minimap', 'sounds'] as const;
   type Prefs = Record<(typeof PREF_NAMES)[number], boolean>;
   const prefs = ((): Prefs => {
     const all = Object.fromEntries(PREF_NAMES.map((name) => [name, true])) as Prefs;
@@ -1799,7 +1811,7 @@ async function boot(): Promise<void> {
   })();
   const savePrefs = (): void => {
     try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ ...prefs, volume: Number($<HTMLInputElement>('pref-volume').value) }));
     } catch {
       // it just opens the menu again next time
     }
@@ -2026,7 +2038,22 @@ async function boot(): Promise<void> {
   $('menu-open').addEventListener('click', () => openMenu());
   $('menu-tab-worlds').addEventListener('click', () => showTab('worlds'));
   $('menu-tab-settings').addEventListener('click', () => showTab('settings'));
+  // how loud the sounds are, kept with the rest but as a number
+  const volumeBox = $<HTMLInputElement>('pref-volume');
+  try {
+    const saved = (JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as { volume?: unknown }).volume;
+    volumeBox.value = String(typeof saved === 'number' && saved >= 0 && saved <= 1 ? saved : 0.5);
+  } catch {
+    volumeBox.value = '0.5';
+  }
+  volumeBox.addEventListener('input', () => {
+    savePrefs();
+    applyPrefs();
+  });
   function applyPrefs(): void {
+    sounds.on = prefs.sounds;
+    sounds.volume = Number(volumeBox.value);
+    volumeBox.disabled = !prefs.sounds;
     scene.setOptions({ ...DEFAULT_SCENE_OPTIONS, scenery: prefs.scenery, particles: prefs.particles, shake: prefs.shake, intent: prefs.intent });
     $('app').classList.toggle('no-minimap', !prefs.minimap);
     for (const name of PREF_NAMES) {
@@ -2114,6 +2141,7 @@ async function boot(): Promise<void> {
     }
     thoughts.take(events, world.tick, world.creatures.map((c) => c.id), new Map(world.creatures.map((c) => [c.id, c.name])));
     notesThisFrame = 0;
+    sounds.play(events, heard);
     for (const event of events) {
       if (event.type === 'sound') playNote(event.pitch, event.seconds);
       else if (event.type === 'solved') toast(`${event.name} solved in ${Math.round(event.seconds)} seconds!`);

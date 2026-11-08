@@ -1544,7 +1544,8 @@ button.my-tool {
 }
 
 .no-minimap #minimap,
-.playing #minimap {
+.playing #minimap,
+.in-body #minimap {
   display: none !important;
 }
 

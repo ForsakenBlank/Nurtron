@@ -61,6 +61,7 @@ interface Particle {
   life: number;
   size: number;
   colour: number;
+  text?: string; // what a 'zzz' says, which is also used for a ? or a !
 }
 
 export interface Ghost {
@@ -427,14 +428,19 @@ export class Scene {
         for (let i = 0; i < 14; i++) this.spawn('star', headX, headY + 40, rand(-140, 140), rand(-220, -60), 0.8, rand(3, 6), 0xffffff);
       } else if (event.type === 'decided') {
         face.thinkGlow = 1;
+      } else if (event.type === 'gaveUp') {
+        // a puzzled look, when it couldn't get to something
+        if (event.name) this.spawn('zzz', headX + c.facing * 18, headY - 6, 0, -26, 1.3, 20, 0xffd34d, '?');
+      } else if (event.type === 'noticed') {
+        this.spawn('zzz', headX - c.facing * 18, headY - 6, 0, -30, 1.2, 20, 0x8fe3ff, '!');
       }
     }
   }
 
-  private spawn(kind: Particle['kind'], x: number, y: number, vx: number, vy: number, life: number, size: number, colour: number): void {
+  private spawn(kind: Particle['kind'], x: number, y: number, vx: number, vy: number, life: number, size: number, colour: number, text?: string): void {
     if (!this.options.particles && kind !== 'zzz') return;
     if (this.particles.length > 150) this.particles.shift();
-    this.particles.push({ kind, x, y, vx, vy, age: 0, life, size, colour });
+    this.particles.push({ kind, x, y, vx, vy, age: 0, life, size, colour, text });
   }
 
   // alpha is how far through the current tick we are, so things glide smoothly at any frame rate
@@ -868,6 +874,9 @@ export class Scene {
           this.textLayer.addChild(label);
         }
         zUsed++;
+        const words = p.text ?? 'z';
+        if (label.text !== words) label.text = words;
+        label.scale.set(p.size / 16);
         label.visible = true;
         label.position.set(p.x, p.y);
         label.alpha = left;
