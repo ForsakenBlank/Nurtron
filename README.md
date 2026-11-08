@@ -35,6 +35,7 @@ npm install
 npm start
 ```
 
+- **The main menu** opens at the start, and **Menu** at the top left brings it back. It has your **worlds**, each with a picture of its map, to make, go into, rename and delete, and **Settings**, with **app updates**: every version, to update, reinstall or go back to. Nothing is downloaded until you press a version's button and say yes.
 - **Click your creature** to pet it, **right-click** to slap it, **drag** to carry it. A pet or a slap teaches it about what it did in the last few seconds.
 - **Pick a shape** from the bottom bar, then click to place it or drag to size it. Drag a plank from end to end to make a ramp.
 - **Click things** to select and drag them, **right-click** for properties, **R** to rotate. **Ctrl+Z** undoes anything.
@@ -55,16 +56,15 @@ npm start
 - **Family** shows what a creature is like and its relatives, and is where two grown-ups can have a baby.
 - **Drag empty space** to look around, **scroll** to zoom, **Shift+drag** to select several, **F** to find your creature, **0** to see the whole room.
 - **The Room arrows** at the bottom left of the map add more space on any side, any time. **World settings** in Files can set an exact size.
-- **App updates**, in Files, says if there's a newer version. It only reads the list from GitHub, and never downloads anything itself.
 - **Tab** or **Mind** shows and hides what it's thinking. Drag the panel's edge to resize it.
 - **Space** pauses, and **1**, **2** and **3** set the speed.
 - Hover over anything to see what it has learned about that thing.
 
-It saves by itself. Your creatures are still there when you come back, and the world stops while the game is closed.
+It saves by itself. Your creatures are still there when you come back, and a world stops while the game is closed or you're on the main menu.
 
 ### More detail
 
-The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), and watching, resting, places, planning and app updates are in [docs/milestone-8.md](docs/milestone-8.md).
+The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), watching, resting, places and planning are in [docs/milestone-8.md](docs/milestone-8.md), and the main menu, worlds, settings and updates are in [docs/milestone-9.md](docs/milestone-9.md).
 
 ## Commands
 
@@ -120,10 +120,12 @@ src/app/    the game window
   thoughts.ts       what it has been thinking, in plain words
   pictures.ts       shrinking an image for a shape
   brain-view.ts     the live picture of its brain
-  updates.ts        asking GitHub if there's a newer version
-electron/   the desktop shell
+  updates.ts        the list of versions, and installing one
+  worlds.ts         your worlds, for the main menu
+  world-preview.ts  the little picture of each world's map
+electron/   the desktop shell, and the updater
 tests/      automated tests
 docs/       notes on each milestone
 ```
 
-See [docs/milestone-8.md](docs/milestone-8.md) for where things stand. There are no accounts, no servers and no online AI: it all runs on your own PC.
+See [docs/milestone-9.md](docs/milestone-9.md) for where things stand. There are no accounts, no servers and no online AI: it all runs on your own PC.

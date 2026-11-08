@@ -97,6 +97,7 @@ export class Scene {
   private faces = new Map<number, Face>();
   private tags = new Map<number, Text>();
   private time = 0;
+  private still = false;
   private shake = 0;
   private roomSize: { width: number; height: number; floor: number } = ROOM;
   private drawnSize = '';
@@ -340,6 +341,8 @@ export class Scene {
   draw(world: World, dt: number, speed: number, alpha: number, overlay: Overlay): void {
     this.syncSize(world);
     this.fit(world);
+    // paused, dt is 0, so legs, blinks, sparkles and pulses all hold where they are
+    this.still = dt === 0;
     this.time += dt;
     this.shake = Math.max(0, this.shake - dt * 4);
 
@@ -676,7 +679,7 @@ export class Scene {
     g.restore();
 
     // zzz, using pooled text so they don't get rebuilt
-    if (resting && Math.random() < 0.02) this.spawn('zzz', x + 24, feetY - 60, 12, -22, 1.8, 15, 0xc8d2ff);
+    if (resting && !this.still && Math.random() < 0.02) this.spawn('zzz', x + 24, feetY - 60, 12, -22, 1.8, 15, 0xc8d2ff);
   }
 
   private drawParticles(dt: number): void {

@@ -34,10 +34,14 @@ import { PropertiesPanel } from './properties.ts';
 import { COLOURS, Scene } from './scene.ts';
 import { compareVersions, FIRST_WITH_INSTALLER, fetchReleases, installer, safePage, updateWords, verbFor } from './updates.ts';
 import type { Release } from './updates.ts';
+import { summarise } from './world-preview.ts';
+import { indexedStore, WorldStore } from './worlds.ts';
+import type { WorldEntry } from './worlds.ts';
 
 const SAVE_KEY = 'nurtron.world';
 const TOOLS_KEY = 'nurtron.tools';
 const PANEL_KEY = 'nurtron.panel';
+const PREFS_KEY = 'nurtron.prefs';
 const SIZES = [
   { name: 'Small', width: 2000, height: 1000 },
   { name: 'Medium', width: 6000, height: 2000 },
@@ -95,8 +99,12 @@ function newGame(): World {
   return new World({ seed: newSeed(), egg: true, genes: newGenes(), size: NEW_WORLD_SIZE });
 }
 
+// false only when there's no world open, like after deleting the one you were in. a placeholder is never kept
+let saving = true;
+
 // false if it couldn't be written, which the player needs to hear about
 function save(world: World): boolean {
+  if (!saving) return true;
   try {
     localStorage.setItem(SAVE_KEY, world.save());
     return true;
@@ -140,6 +148,7 @@ async function boot(): Promise<void> {
   document.body.innerHTML = `
     <div id="app">
       <header>
+        <button id="menu-open" title="Your worlds, settings and app updates">Menu</button>
         <span class="logo">Nurtron</span>
         <input id="name" aria-label="Creature name" maxlength="20" spellcheck="false" />
         <button id="customise-open" title="Change your creature's skin and colours">Customise</button>
@@ -159,7 +168,7 @@ async function boot(): Promise<void> {
             <button id="clear-room" title="Empty the room. You can undo this.">Clear room</button>
             <b>Everything</b>
             <button id="save-world" title="Save the room and your creature together in one file.">Save world</button>
-            <button id="open-world" title="Open a world file. It replaces your room and your creatures.">Open world</button>
+            <button id="open-world" title="Open a world file as a new world. The one you're in is kept on the main menu.">Open world</button>
             <button id="size-open" title="This world's size and gravity, or start a new one">World settings</button>
             <b>Trials</b>
             <button id="save-trial" title="Save this room as a Trial for a friend's creature to try. A Goal part says what counts as solving it, and a Start part says where creatures begin.">Save as Trial</button>
@@ -311,22 +320,58 @@ async function boot(): Promise<void> {
         <label>Direction <select id="gravity-direction"><option value="90">Down</option><option value="-90">Up</option><option value="0">Right</option><option value="180">Left</option></select></label>
       </div>
       <div class="muted size-note">Strength 1 is normal, and 0 is none, where creatures float-walk anywhere.</div>
-      <div class="prop-actions"><button id="size-apply">Apply to this world</button><button id="size-new" class="danger">Start a new world</button></div>
+      <div class="prop-actions"><button id="size-apply">Apply to this world</button><button id="size-new" title="This one is kept on the main menu">Start a new world</button></div>
       <div class="muted size-note"></div>
     </div>
-    <div id="update-panel" role="dialog" aria-label="App updates">
-      <div class="prop-head"><b>App updates</b><button id="update-close" class="prop-close" aria-label="Close">✕</button></div>
-      <div class="update-row">
-        <span id="update-version"></span>
-        <span class="update-actions">
-          <button id="update-check">Check for updates</button>
-          <button id="update-get" class="accent" hidden>Update now</button>
-        </span>
+    <div id="menu" role="dialog" aria-label="Main menu">
+      <div class="menu-card">
+        <div class="menu-top">
+          <div>
+            <div class="menu-title">Nurtron</div>
+            <div class="muted" id="menu-version"></div>
+          </div>
+          <div class="menu-nav">
+            <button id="menu-tab-worlds" class="on">Worlds</button>
+            <button id="menu-tab-settings">Settings</button>
+            <button id="menu-quit" hidden>Quit</button>
+            <button id="menu-close" class="prop-close" aria-label="Back to the world" title="Back to the world">✕</button>
+          </div>
+        </div>
+        <section id="menu-worlds">
+          <div class="menu-row">
+            <button id="menu-continue" class="accent">Continue</button>
+            <button id="menu-new">New world</button>
+            <button id="menu-open-file" title="A .nworld file, added as a new world">Open a world file</button>
+          </div>
+          <div id="menu-new-form" hidden>
+            <input id="new-world-name" class="prop-name" maxlength="40" placeholder="Name it" aria-label="World name" />
+            <div class="prop-actions" id="new-world-sizes"></div>
+            <div class="muted size-note">It starts with a new egg. You can make it bigger later from inside.</div>
+            <div class="prop-actions"><button id="new-world-make" class="accent">Make it</button><button id="new-world-cancel">Never mind</button></div>
+          </div>
+          <div id="world-grid"></div>
+        </section>
+        <section id="menu-settings" hidden>
+          <div class="settings-group">
+            <div class="prop-heading">Starting up</div>
+            <label class="update-auto"><input type="checkbox" id="pref-menu-start" /> Open this menu when Nurtron starts</label>
+          </div>
+          <div class="settings-group" id="update-panel">
+            <div class="prop-heading">App updates</div>
+            <div class="update-row">
+              <span id="update-version"></span>
+              <span class="update-actions">
+                <button id="update-check">Check for updates</button>
+                <button id="update-get" class="accent" hidden>Update now</button>
+              </span>
+            </div>
+            <div class="muted update-status" id="update-status"></div>
+            <div id="update-list"></div>
+            <label class="update-auto"><input type="checkbox" id="update-auto" /> Check when Nurtron starts</label>
+            <div class="muted size-note" id="update-note">This asks GitHub which versions there are. Nothing is downloaded or installed until you press a version's button and say yes.</div>
+          </div>
+        </section>
       </div>
-      <div class="muted update-status" id="update-status"></div>
-      <div id="update-list"></div>
-      <label class="update-auto"><input type="checkbox" id="update-auto" /> Check when Nurtron starts</label>
-      <div class="muted size-note" id="update-note">This asks GitHub which versions there are. Nothing is downloaded or installed until you press a version's button and say yes.</div>
     </div>
     <div id="tool-menu" class="pop-menu" role="menu"></div>
     <div id="ask" role="alertdialog">
@@ -348,9 +393,22 @@ async function boot(): Promise<void> {
   await scene.start(stage);
   const brainView = new BrainView($<HTMLCanvasElement>('brain-canvas'));
 
-  const loaded = loadOrCreate();
+  // the worlds on the main menu. someone from before worlds keeps theirs, as their first one
+  const store = new WorldStore(localStorage, indexedStore(), SAVE_KEY);
+  const loaded = store.activeId || !store.list().length ? loadOrCreate() : { world: newGame(), notice: '' };
   let world = loaded.world;
   if (loaded.notice) window.setTimeout(() => toast(loaded.notice), 500);
+  if (!store.list().length) {
+    try {
+      const first = await store.add('My world', world.save(), summarise(world));
+      store.setActive(first.id);
+    } catch (err) {
+      console.error('Could not make the first world', err);
+    }
+  }
+  // with no world open, what's on screen is only a stand-in until one is chosen, and is never saved
+  saving = store.activeId !== null;
+  let inMenu = false;
   let speed = 1;
   let carry = 0;
   let lastDecision: Decision | null = null;
@@ -936,11 +994,9 @@ async function boot(): Promise<void> {
         toast(`Opened ${file.name}. Ctrl+Z puts your old room back.`);
       } else if (type === 'nurtron-world') {
         const data = parseWorld(text);
-        const who = world.creatures.length > 1 ? 'everyone in it' : world.creature.name;
-        confirmReplace(`Open this world? Your room and ${who} get replaced by it, and undo won't bring them back.`, `Open ${file.name}`, () => {
-          swapWorld(openWorld(data, newSeed()));
-          toast(`Welcome to ${file.name}.`);
-        });
+        const next = openWorld(data, newSeed());
+        await addWorld(file.name.replace(/\.[^.]+$/, '') || 'A world', next);
+        toast(`Welcome to ${file.name}. The world you were in is on the main menu.`);
       } else if (type === 'nurtron-trial') {
         enterTrial(parseTrial(text));
       } else if (type === 'nurtron-tool') {
@@ -967,8 +1023,9 @@ async function boot(): Promise<void> {
   }
 
   // asks before anything that can't be undone, and offers the way out of it
-  function confirmReplace(words: string, yes: string, act: () => void): void {
+  function confirmReplace(words: string, yes: string, act: () => void, offerSave = true): void {
     const box = $('ask');
+    $('ask-save').style.display = offerSave ? '' : 'none';
     $('ask-words').textContent = words;
     $('ask-yes').textContent = yes;
     box.style.display = 'block';
@@ -1114,7 +1171,8 @@ async function boot(): Promise<void> {
   // buttons shouldn't keep the keyboard, or pressing Space to pause would press them again
   document.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
-    if (target.closest('button')) (document.activeElement as HTMLElement | null)?.blur();
+    // a button that puts the keyboard in a box, like New world or Rename, keeps it there
+    if (target.closest('button') && document.activeElement?.tagName === 'BUTTON') (document.activeElement as HTMLElement).blur();
   });
 
   function showTooltip(e: { clientX: number; clientY: number }, html: string): void {
@@ -1400,14 +1458,12 @@ async function boot(): Promise<void> {
     strength: Number($<HTMLInputElement>('gravity-strength').value) || 0,
     direction: Number($<HTMLSelectElement>('gravity-direction').value),
   });
-  $('size-new').addEventListener('click', () => {
+  $('size-new').addEventListener('click', async () => {
     const size = { width: Number(widthBox.value), height: Number(heightBox.value) };
     const gravity = chosenGravity();
     sizePanel.style.display = 'none';
-    confirmReplace(`Start a new world? Your room and ${world.creatures.length > 1 ? 'everyone in it' : world.creature.name} get replaced, and undo won't bring them back.`, 'Start a new world', () => {
-      swapWorld(new World({ seed: newSeed(), egg: true, genes: newGenes(), size, gravity }));
-      toast('A new world, with a new egg.');
-    });
+    await addWorld(`World ${store.list().length + 1}`, new World({ seed: newSeed(), egg: true, genes: newGenes(), size, gravity }));
+    toast('A new world, with a new egg. The one you were in is on the main menu.');
   });
 
   // app updates, like the ones in Prism: a check, every version with what changed, and a quiet check once a day
@@ -1553,15 +1609,7 @@ async function boot(): Promise<void> {
     updatePrefs.auto = (e.target as HTMLInputElement).checked;
     saveUpdatePrefs();
   });
-  updatePanel.addEventListener('pointerdown', (e) => e.stopPropagation());
-  updatePanel.addEventListener('keydown', (e) => e.stopPropagation());
-  $('updates-open').addEventListener('click', () => {
-    updatePanel.style.display = 'block';
-    if (!$('update-list').childElementCount) checkForUpdates(false);
-  });
-  $('update-close').addEventListener('click', () => {
-    updatePanel.style.display = 'none';
-  });
+  $('updates-open').addEventListener('click', () => openMenu('settings'));
   $('update-check').addEventListener('click', () => checkForUpdates(false));
   $('update-get').addEventListener('click', () => {
     if (!updateNewer) return;
@@ -1569,6 +1617,251 @@ async function boot(): Promise<void> {
     else openPage(updateNewer.page);
   });
   if (updatePrefs.auto && Date.now() - updatePrefs.lastCheck > 20 * 3600 * 1000) window.setTimeout(() => checkForUpdates(true), 8000);
+
+  // ---- the main menu: worlds, and settings ----
+  const prefs = ((): { menuAtStart: boolean } => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as { menuAtStart?: unknown };
+      return { menuAtStart: saved.menuAtStart !== false };
+    } catch {
+      return { menuAtStart: true };
+    }
+  })();
+  const savePrefs = (): void => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+      // it just opens the menu again next time
+    }
+  };
+  const menu = $('menu');
+  let menuBusy = false;
+  $('menu-version').textContent = `Version ${__APP_VERSION__}`;
+  menu.addEventListener('pointerdown', (e) => e.stopPropagation());
+  menu.addEventListener('keydown', (e) => e.stopPropagation());
+
+  function showTab(tab: 'worlds' | 'settings'): void {
+    $('menu-worlds').hidden = tab !== 'worlds';
+    $('menu-settings').hidden = tab !== 'settings';
+    $('menu-tab-worlds').classList.toggle('on', tab === 'worlds');
+    $('menu-tab-settings').classList.toggle('on', tab === 'settings');
+    if (tab === 'settings' && !$('update-list').childElementCount) checkForUpdates(false);
+  }
+
+  // the world stops while the menu is up, and gets a fresh picture for its card
+  function openMenu(tab: 'worlds' | 'settings' = 'worlds'): void {
+    if (playingFrom) setPlaying(false);
+    inMenu = true;
+    menu.style.display = 'flex';
+    showTab(tab);
+    renderWorlds();
+    const id = store.activeId;
+    if (id) {
+      save(world);
+      store.keep(id, world.save(), summarise(world)).then(renderWorlds, (err) => console.error('Could not keep the world', err));
+    }
+  }
+  function closeMenu(): void {
+    if (!store.activeId) return toast('Choose a world, or make a new one, first.');
+    inMenu = false;
+    menu.style.display = 'none';
+    $('menu-new-form').hidden = true;
+  }
+
+  // leaves the world you're in, kept safe, and goes into this one
+  async function switchTo(id: string, next: World): Promise<void> {
+    const was = store.activeId;
+    if (was && saving) await store.keep(was, world.save(), summarise(world));
+    store.setActive(id);
+    saving = true;
+    swapWorld(next);
+    closeMenu();
+  }
+
+  async function addWorld(name: string, next: World): Promise<void> {
+    if (menuBusy) return;
+    menuBusy = true;
+    try {
+      const entry = await store.add(name, next.save(), summarise(next));
+      await switchTo(entry.id, next);
+    } catch (err) {
+      next.dispose();
+      toast(err instanceof Error ? err.message : "That world couldn't be made.");
+    } finally {
+      menuBusy = false;
+    }
+  }
+
+  async function enterWorld(entry: WorldEntry): Promise<void> {
+    if (entry.id === store.activeId) return closeMenu();
+    if (menuBusy) return;
+    menuBusy = true;
+    try {
+      const text = await store.text(entry.id);
+      if (!text) throw new Error(`${entry.name} couldn't be found.`);
+      let next: World;
+      try {
+        next = World.load(text);
+      } catch {
+        throw new Error(`${entry.name} couldn't be opened. It's still kept, in case a newer version can read it.`);
+      }
+      await switchTo(entry.id, next);
+      toast(`Welcome back to ${entry.name}.`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "That world couldn't be opened.");
+    } finally {
+      menuBusy = false;
+    }
+  }
+
+  const agoWords = (when: number): string => {
+    const minutes = Math.round((Date.now() - when) / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
+  };
+
+  function renderWorlds(): void {
+    const grid = $('world-grid');
+    grid.replaceChildren();
+    $('menu-continue').hidden = !store.activeId;
+    $('menu-close').hidden = !store.activeId;
+    for (const entry of store.list()) {
+      const card = document.createElement('div');
+      card.className = 'world-card';
+      card.classList.toggle('open', entry.id === store.activeId);
+      const picture = document.createElement('button');
+      picture.className = 'world-picture';
+      picture.title = `Go into ${entry.name}`;
+      if (entry.preview) {
+        const img = document.createElement('img');
+        img.src = entry.preview;
+        img.alt = `The map of ${entry.name}`;
+        picture.appendChild(img);
+      } else picture.textContent = 'No picture yet';
+      picture.addEventListener('click', () => enterWorld(entry));
+      const name = document.createElement('div');
+      name.className = 'world-name';
+      name.textContent = entry.name;
+      if (entry.id === store.activeId) {
+        const badge = document.createElement('span');
+        badge.className = 'update-badge';
+        badge.textContent = 'OPEN NOW';
+        name.appendChild(badge);
+      }
+      const about = document.createElement('div');
+      about.className = 'muted world-about';
+      const who = entry.creatures.length ? (entry.creatures.length > 3 ? `${entry.creatures.slice(0, 3).join(', ')} and ${entry.creatures.length - 3} more` : entry.creatures.join(', ')) : '';
+      about.textContent = [who, entry.width ? `${entry.width} by ${entry.height}` : '', `played ${agoWords(entry.played)}`].filter(Boolean).join(' · ');
+      about.title = about.textContent;
+      const actions = document.createElement('div');
+      actions.className = 'world-actions';
+      const go = document.createElement('button');
+      go.className = 'accent';
+      go.textContent = entry.id === store.activeId ? 'Back in' : 'Play';
+      go.addEventListener('click', () => enterWorld(entry));
+      const rename = document.createElement('button');
+      rename.textContent = 'Rename';
+      rename.addEventListener('click', () => {
+        const box = document.createElement('input');
+        box.className = 'prop-name';
+        box.maxLength = 40;
+        box.value = entry.name;
+        name.replaceWith(box);
+        box.focus();
+        box.select();
+        const done = (): void => {
+          store.rename(entry.id, box.value);
+          renderWorlds();
+        };
+        box.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') done();
+          if (e.key === 'Escape') renderWorlds();
+        });
+        box.addEventListener('blur', done);
+      });
+      const remove = document.createElement('button');
+      remove.className = 'danger';
+      remove.textContent = 'Delete';
+      remove.addEventListener('click', () => {
+        const open = entry.id === store.activeId;
+        confirmReplace(
+          `Delete ${entry.name}${who ? `, with ${who} in it` : ''}? This can't be undone. Save World from Files first if you might want it back.`,
+          'Delete it',
+          async () => {
+            await store.remove(entry.id);
+            if (open) saving = false;
+            renderWorlds();
+            toast(`${entry.name} was deleted.`);
+          },
+          false,
+        );
+      });
+      actions.append(go, rename, remove);
+      card.append(picture, name, about, actions);
+      grid.appendChild(card);
+    }
+    if (!store.list().length) {
+      const none = document.createElement('div');
+      none.className = 'muted';
+      none.textContent = 'No worlds yet. Make a new one to start.';
+      grid.appendChild(none);
+    }
+  }
+
+  let newSize = NEW_WORLD_SIZE;
+  for (const preset of SIZES) {
+    const b = document.createElement('button');
+    b.textContent = preset.name;
+    b.title = `${preset.width} by ${preset.height}`;
+    b.classList.toggle('on', preset === newSize);
+    b.addEventListener('click', () => {
+      newSize = preset;
+      for (const other of $('new-world-sizes').children) other.classList.toggle('on', other === b);
+    });
+    $('new-world-sizes').appendChild(b);
+  }
+  $('menu-new').addEventListener('click', () => {
+    if (store.full) return toast('That\'s as many worlds as there\'s room for. Delete one first.');
+    $('menu-new-form').hidden = false;
+    const box = $<HTMLInputElement>('new-world-name');
+    box.value = `World ${store.list().length + 1}`;
+    box.focus();
+    box.select();
+  });
+  $('new-world-cancel').addEventListener('click', () => {
+    $('menu-new-form').hidden = true;
+  });
+  const makeWorld = (): void => {
+    const name = $<HTMLInputElement>('new-world-name').value;
+    $('menu-new-form').hidden = true;
+    addWorld(name, new World({ seed: newSeed(), egg: true, genes: newGenes(), size: newSize })).then(() => toast('A new world, with a new egg.'));
+  };
+  $('new-world-make').addEventListener('click', makeWorld);
+  $<HTMLInputElement>('new-world-name').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') makeWorld();
+  });
+  $('menu-open-file').addEventListener('click', () => anyFile.click());
+  $('menu-continue').addEventListener('click', closeMenu);
+  $('menu-close').addEventListener('click', closeMenu);
+  $('menu-open').addEventListener('click', () => openMenu());
+  $('menu-tab-worlds').addEventListener('click', () => showTab('worlds'));
+  $('menu-tab-settings').addEventListener('click', () => showTab('settings'));
+  $<HTMLInputElement>('pref-menu-start').checked = prefs.menuAtStart;
+  $<HTMLInputElement>('pref-menu-start').addEventListener('change', (e) => {
+    prefs.menuAtStart = (e.target as HTMLInputElement).checked;
+    savePrefs();
+  });
+  // only the desktop app has a window of its own to close
+  if (installer()) {
+    $('menu-quit').hidden = false;
+    $('menu-quit').addEventListener('click', () => {
+      save(world);
+      window.close();
+    });
+  }
+  if (prefs.menuAtStart || !store.activeId) openMenu();
 
   $('revive').addEventListener('click', () => {
     world.revive();
@@ -1604,7 +1897,10 @@ async function boot(): Promise<void> {
   let sinceText = 0;
   scene.app.ticker.add((ticker) => {
     const dt = Math.min(0.1, ticker.deltaMS / 1000);
-    carry += dt * speed * TICKS_PER_SECOND;
+    // paused, or in the menu, nothing moves at all, so nothing should look like it's moving either
+    const still = inMenu || speed === 0;
+    const moving = still ? 0 : dt;
+    carry += moving * speed * TICKS_PER_SECOND;
     const steps = Math.min(64, Math.floor(carry));
     carry -= Math.floor(carry);
     for (let i = 0; i < steps; i++) world.step();
@@ -1632,9 +1928,9 @@ async function boot(): Promise<void> {
     }
     if (world.focusId !== shownFocus) syncFocus();
     scene.handle(events, world);
-    scene.draw(world, dt, speed, carry, editor.overlay());
+    scene.draw(world, moving, speed, carry, editor.overlay());
     // no point working out a picture of something nobody can see
-    if (panelState.open && ($('brain-box') as HTMLDetailsElement).open) brainView.draw(world.creature.brain, world.needs(), world.creature.drives, dt);
+    if (panelState.open && ($('brain-box') as HTMLDetailsElement).open) brainView.draw(world.creature.brain, world.needs(), world.creature.drives, moving);
 
     sinceText += dt;
     if (sinceText > 0.15) {
@@ -1650,7 +1946,7 @@ async function boot(): Promise<void> {
       }
     }
     sinceSave += dt;
-    if (sinceSave > 10) {
+    if (sinceSave > 10 && !inMenu) {
       sinceSave = 0;
       if (!save(world) && !warnedSave) {
         warnedSave = true;
@@ -1668,7 +1964,7 @@ async function boot(): Promise<void> {
 
   // for checking the running game from the console and from tests
   Object.assign(window, {
-    nurtron: { getWorld: () => world, getDecision: () => lastDecision, setSpeed, editor, scene, ROOM },
+    nurtron: { getWorld: () => world, getDecision: () => lastDecision, setSpeed, editor, scene, ROOM, store, openMenu, closeMenu },
   });
 }
 

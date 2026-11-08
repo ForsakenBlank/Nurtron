@@ -214,7 +214,10 @@ async function runCheck(win) {
     await shoot(pictureFile);
 
     await win.loadFile(pageFile);
-    await wait(5000);
+    await wait(1000);
+    // it opens on the main menu, where the world is stopped, so it goes into the world like a player would
+    await win.webContents.executeJavaScript('document.getElementById("menu-continue").click(); 1');
+    await wait(4000);
     const game = await win.webContents.executeJavaScript(
       '({ running: !!window.nurtron, tick: window.nurtron?.getWorld().tick ?? 0, canvas: !!document.querySelector("#stage canvas") })',
     );
