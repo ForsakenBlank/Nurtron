@@ -16,13 +16,14 @@ export type StepId = (typeof STEPS)[number]['id'];
 interface Saved {
   done: StepId[];
   hidden: boolean;
+  folded?: boolean; // just the heading, so it takes up less of the room
 }
 
 function load(storage: Storage): Saved {
   try {
     const raw = JSON.parse(storage.getItem(KEY) ?? '{}') as { done?: unknown; hidden?: unknown };
     const done = Array.isArray(raw.done) ? raw.done.filter((id): id is StepId => STEPS.some((s) => s.id === id)) : [];
-    return { done, hidden: raw.hidden === true };
+    return { done, hidden: raw.hidden === true, folded: (raw as { folded?: unknown }).folded === true };
   } catch {
     return { done: [], hidden: false };
   }
@@ -82,7 +83,7 @@ export class Guide {
   }
 
   render(): void {
-    const key = `${this.state.hidden}|${this.state.done.join()}`;
+    const key = `${this.state.hidden}|${this.state.folded}|${this.state.done.join()}`;
     if (key === this.drawn) return;
     this.drawn = key;
     const show = !this.state.hidden && !this.finished;
@@ -91,8 +92,15 @@ export class Guide {
     this.box.replaceChildren();
     const head = document.createElement('div');
     head.className = 'guide-head';
-    const title = document.createElement('b');
-    title.textContent = `First steps · ${this.state.done.length} of ${STEPS.length}`;
+    const title = document.createElement('button');
+    title.className = 'guide-title';
+    title.textContent = `${this.state.folded ? '▸' : '▾'} First steps · ${this.state.done.length} of ${STEPS.length}`;
+    title.title = this.state.folded ? 'Show the list' : 'Fold it away';
+    title.addEventListener('click', () => {
+      this.state.folded = !this.state.folded;
+      this.keep();
+      this.render();
+    });
     const close = document.createElement('button');
     close.className = 'prop-close';
     close.textContent = '✕';
@@ -108,6 +116,8 @@ export class Guide {
       li.textContent = step.words;
       list.appendChild(li);
     }
+    list.hidden = !!this.state.folded;
+    this.box.classList.toggle('folded', !!this.state.folded);
     this.box.append(head, list);
   }
 }

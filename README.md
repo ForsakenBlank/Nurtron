@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > **This game is vibe coded and early.** It was built mostly by chatting with an AI coding assistant, not written
-> line by line by an experienced developer. Expect rough edges and bugs. There's no tutorial yet. You can download a build from
+> line by line by an experienced developer. Expect rough edges and bugs. There's a short First steps list in the corner, but no proper tutorial yet. You can download a build from
 > [Releases](https://github.com/ForsakenBlank/Nurtron/releases), or run it from source. It's mostly been used on Linux, and the Windows build is barely tested.
 
 **You wire up a living creature's body, then raise what you've made.**
@@ -19,6 +19,7 @@ In most creature games, the designers decide what a creature's body and needs ar
 - **Minds that grow.** They learn by watching each other, go over what happened while they rest, come to like or avoid places, and work out chains several steps long, like a lever that shows a button that makes food.
 - **Bodies made of real wires.** Hunger, energy and everything else are circuits you can open up and change. Choose ready-made stats, or wire your own.
 - **A physics sandbox.** Build with shapes, ramps, motors and sensors. Rooms can be huge, and gravity can change from place to place, with zero-gravity zones where creatures walk on the air.
+- **Creatures that notice each other.** They can go to, push or cuddle up to each other, and a lonely one learns to go looking for company.
 - **Families.** Genes, babies, siblings who act differently, and family trees.
 - **Sharing as plain files.** Creatures, rooms, worlds, tools and Trials are all files that only hold data, so a file from a stranger can't run anything on your PC.
 - **Words and Trials.** Teach a creature to come when called, or send a friend a room built to test their creature.
@@ -41,7 +42,7 @@ npm start
 - **Click things** to select and drag them, **right-click** for properties, **R** to rotate. **Ctrl+Z** undoes anything.
 - **Pick a part** from the bottom bar, then **drag from one of its ports** to another to wire them up. **Right-click** a wire to remove it. **Add: Counter** and **Hunger** drop in ready-made circuits to pull apart.
 - **Make it food:** hover near a shape to find its Touched output, then drag that onto a **Give** part set to Hunger with a number below zero. **Add: Wired fruit** drops in a ready-made one. Hunger at 100 means starving.
-- **Choose its stats:** New egg and the Family panel let you pick from Hunger, Energy, Thirst, Health, Dies at 0 Health, Happiness and Loneliness.
+- **Choose its stats:** New egg and the Family panel let you pick from Hunger, Energy, Thirst, Health, Dies at 0 Health, Happiness and Loneliness. Loneliness comes down with a pet, or a cuddle from another creature.
 - **Double-click your creature** to look inside. Its stats are real wires you can change, and any value plugged into a **Drive socket** becomes something it cares about.
 - **Customise**, next to its name, changes its skin and colours.
 - **Tell it what to do:** right-click a shape to send it there. Give several orders and it does them in order, and learns from them.
@@ -55,6 +56,11 @@ npm start
 - **Play** runs what you've built as a game, with the editor out of the way. Esc stops and puts it all back.
 - **Family** shows what a creature is like and its relatives, and is where two grown-ups can have a baby.
 - **Drag empty space** to look around, **scroll** to zoom, **Shift+drag** to select several, **F** to find your creature, **0** to see the whole room.
+- **L** or **Follow** keeps your creature in view, and **[** and **]** look at the previous or next creature.
+- **The map** in the bottom right shows the whole room. Click it to look somewhere, and **M** hides it.
+- **?** lists every keyboard shortcut.
+- **Files, then Save a picture** saves what's in the window as a PNG.
+- **Settings** in the main menu can switch off the scenery, particles, screen shake, sounds, the thought bubble and the map.
 - **The Room arrows** at the bottom left of the map add more space on any side, any time. **World settings** in Files can set an exact size.
 - **Tab** or **Mind** shows and hides what it's thinking. Drag the panel's edge to resize it.
 - **Space** pauses, and **1**, **2** and **3** set the speed.
@@ -64,7 +70,7 @@ It saves by itself. Your creatures are still there when you come back, and a wor
 
 ### More detail
 
-The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), watching, resting, places and planning are in [docs/milestone-8.md](docs/milestone-8.md), and the main menu, worlds, settings and updates are in [docs/milestone-9.md](docs/milestone-9.md).
+The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), watching, resting, places and planning are in [docs/milestone-8.md](docs/milestone-8.md), the main menu, worlds, settings and updates are in [docs/milestone-9.md](docs/milestone-9.md), and creatures noticing each other, the new look, the map, sounds and the first steps are in [docs/milestone-10.md](docs/milestone-10.md).
 
 ## Commands
 
@@ -123,9 +129,12 @@ src/app/    the game window
   updates.ts        the list of versions, and installing one
   worlds.ts         your worlds, for the main menu
   world-preview.ts  the little picture of each world's map
+  minimap.ts        the map of the whole room in the corner
+  guide.ts          the first steps, which tick themselves off
+  sfx.ts            the little sounds, made on the spot
 electron/   the desktop shell, and the updater
 tests/      automated tests
 docs/       notes on each milestone
 ```
 
-See [docs/milestone-9.md](docs/milestone-9.md) for where things stand. There are no accounts, no servers and no online AI: it all runs on your own PC.
+See [docs/milestone-10.md](docs/milestone-10.md) for where things stand. There are no accounts, no servers and no online AI: it all runs on your own PC.
