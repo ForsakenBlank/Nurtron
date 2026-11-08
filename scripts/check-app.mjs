@@ -11,7 +11,9 @@ execFileSync('npx', ['vite', 'build', '--logLevel', 'error'], { cwd: root, stdio
 
 const out = path.join(mkdtempSync(path.join(tmpdir(), 'nurtron-check-')), 'check.json');
 const electron = require('electron');
-const run = spawnSync(electron, [root], {
+// electron won't start as root unless it's told to go without its sandbox, which only matters on a throwaway machine
+const asRoot = process.getuid?.() === 0;
+const run = spawnSync(electron, asRoot ? ['--no-sandbox', root] : [root], {
   env: { ...process.env, NURTRON_CHECK_OUT: out },
   encoding: 'utf8',
   timeout: 60000,

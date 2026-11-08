@@ -656,7 +656,24 @@ header button {
   white-space: nowrap;
 }
 
-@media (max-width: 1100px) {
+/* the ? button made the header a little wider, so it tightens up a bit sooner */
+@media (max-width: 1360px) {
+  #speed-label {
+    display: none;
+  }
+
+  header {
+    gap: 8px;
+  }
+}
+
+@media (max-width: 1220px) {
+  #age {
+    display: none;
+  }
+}
+
+@media (max-width: 1140px) {
   #age,
   #speed-label {
     display: none;
