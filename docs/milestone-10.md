@@ -1,6 +1,6 @@
 # Milestone 10: creatures that notice each other, a nicer room, and lots of small things
 
-**Status: built and pushed, not released. Everything here was tried in a browser driven by Playwright, and the desktop app check passed under a virtual screen on Linux. Nothing was tried on Windows, and nobody has raised creatures with it by hand for a long time yet.**
+**Status: built, and released as Nurtron 1.0. Everything here was tried in a browser driven by Playwright, and the desktop app check passed under a virtual screen on Linux. Nothing was tried on Windows, and nobody has raised creatures with it by hand for a long time yet.**
 
 ## Creatures notice each other
 
