@@ -69,8 +69,25 @@ export class ThoughtLog {
         for (const id of everyone) if (id !== event.by) this.add(id, tick, `Heard "${event.word}"`, 'plain');
         continue;
       }
-      if (event.type === 'pulse' || event.type === 'loop' || event.type === 'sound' || event.type === 'burst' || event.type === 'solved') continue;
+      if (event.type === 'pulse' || event.type === 'loop' || event.type === 'sound' || event.type === 'burst' || event.type === 'solved' || event.type === 'killed' || event.type === 'fired') continue;
+      if (event.type === 'hurt') {
+        if (event.who !== null && event.thingId === null && event.amount > 0) this.add(event.who, tick, `Got hurt, and lost ${Math.round(event.amount * 10) / 10} Health`, 'bad');
+        continue;
+      }
       const who = event.who;
+      if (event.type === 'picked') {
+        this.add(who, tick, `Picked up the ${event.name}`, 'good');
+        continue;
+      } else if (event.type === 'looted') {
+        this.add(who, tick, `Opened a chest and took ${Object.entries(event.holds).map(([name, n]) => (n === 1 ? name : `${n} ${name}`)).join(', ')}`, 'good');
+        continue;
+      } else if (event.type === 'choosing') {
+        this.add(who, tick, `Stopped to choose between ${event.options.join(', ')}`, 'decide');
+        continue;
+      } else if (event.type === 'chose') {
+        this.add(who, tick, `Chose ${event.options[event.picked]}`, 'decide');
+        continue;
+      }
       if (event.type === 'decided') {
         const what = event.decision.chosen.percept ? ` the ${describe(event.decision.chosen.percept)}` : '';
         const verb = DOING[event.decision.action];

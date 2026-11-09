@@ -23,7 +23,8 @@ In most creature games, the designers decide what a creature's body and needs ar
 - **Families.** Genes, babies, siblings who act differently, and family trees.
 - **Sharing as plain files.** Creatures, rooms, worlds, tools and Trials are all files that only hold data, so a file from a stranger can't run anything on your PC.
 - **Words and Trials.** Teach a creature to come when called, or send a friend a room built to test their creature.
-- **The start of a game engine.** Keyboard, Mouse, Spawner, Collision, Camera, Sound and more, plus a Play mode that hides the editor so what you built runs as a game.
+- **A game maker.** Keyboard, Mouse, Spawner, Collision, Camera, Sound and more, plus enemies with pathfinding, health, items, chests, Storage for things like cash and score, Movers with keyframes, Chance, Abilities, Effects and Choices the creature makes for itself, and a Play mode that hides the editor so what you built runs as a game.
+- **Over 160 decorations**: blocks, trees, torches, chests, treasure, food and ready-made enemies.
 
 ## Playing it
 
@@ -38,7 +39,10 @@ npm start
 
 - **The main menu** opens at the start, and **Menu** at the top left brings it back. It has your **worlds**, each with a picture of its map, to make, go into, rename and delete, and **Settings**, with **app updates**: every version, to update, reinstall or go back to. Nothing is downloaded until you press a version's button and say yes.
 - **Click your creature** to pet it, **right-click** to slap it, **drag** to carry it. A pet or a slap teaches it about what it did in the last few seconds.
-- **Pick a shape** from the bottom bar, then click to place it or drag to size it. Drag a plank from end to end to make a ramp.
+- **Pick a shape** from the bottom bar, then click to place it or drag to size it. Drag a plank from end to end to make a ramp. Drag the corners of anything selected to resize it.
+- **Decor** has over 160 decorations. Blocks paint into a grid as you drag.
+- **Right-click a shape, then Build area** to build the parts that make it work in a space of its own, with just it in the middle. **Creatures can use it** turns off whether creatures notice it at all.
+- **In a game**, in a shape's properties, makes it an item, a chest, something with health or an enemy. The **Game** parts group has Storage, Inventory, Health, Ability, Effect and Choice.
 - **Click things** to select and drag them, **right-click** for properties, **R** to rotate. **Ctrl+Z** undoes anything.
 - **Pick a part** from the bottom bar, then **drag from one of its ports** to another to wire them up. **Right-click** a wire to remove it. **Add: Counter** and **Hunger** drop in ready-made circuits to pull apart.
 - **Make it food:** hover near a shape to find its Touched output, then drag that onto a **Give** part set to Hunger with a number below zero. **Add: Wired fruit** drops in a ready-made one. Hunger at 100 means starving.
@@ -70,7 +74,7 @@ It saves by itself. Your creatures are still there when you come back, and a wor
 
 ### More detail
 
-The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), watching, resting, places and planning are in [docs/milestone-8.md](docs/milestone-8.md), the main menu, worlds, settings and updates are in [docs/milestone-9.md](docs/milestone-9.md), and creatures noticing each other, the new look, the map, sounds and the first steps are in [docs/milestone-10.md](docs/milestone-10.md).
+The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), watching, resting, places and planning are in [docs/milestone-8.md](docs/milestone-8.md), the main menu, worlds, settings and updates are in [docs/milestone-9.md](docs/milestone-9.md), creatures noticing each other, the new look, the map, sounds and the first steps are in [docs/milestone-10.md](docs/milestone-10.md), and build areas, decorations and everything for making games are in [docs/milestone-11.md](docs/milestone-11.md).
 
 ## Commands
 
@@ -113,6 +117,8 @@ src/sim/    the simulation. no graphics at all, so tests can run it thousands of
   packager.ts       turning a selection into a tool
   textures.ts       pictures on shapes, checked to really be pictures
   family.ts         genes, babies, growing up, family trees
+  game.ts           enemies, sparks and chests, and checking them in files
+  decor.ts          the decorations, and what each one starts out as
   learning-bar.ts   the make-or-break test
 src/app/    the game window
   scene.ts          drawing the room
@@ -132,9 +138,10 @@ src/app/    the game window
   minimap.ts        the map of the whole room in the corner
   guide.ts          the first steps, which tick themselves off
   sfx.ts            the little sounds, made on the spot
+  decor-art.ts      how each decoration is drawn
 electron/   the desktop shell, and the updater
 tests/      automated tests
 docs/       notes on each milestone
 ```
 
-See [docs/milestone-10.md](docs/milestone-10.md) for where things stand. There are no accounts, no servers and no online AI: it all runs on your own PC.
+See [docs/milestone-11.md](docs/milestone-11.md) for where things stand. There are no accounts, no servers and no online AI: it all runs on your own PC.

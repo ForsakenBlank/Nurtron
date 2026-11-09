@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { History } from '../src/sim/edits.ts';
-import { parseRoom, saveRoom } from '../src/sim/room-file.ts';
+import { parseRoom, saveRoom, SIZE_LIMITS } from '../src/sim/room-file.ts';
 import { closestPoint, containsPoint, corners } from '../src/sim/shapes.ts';
 import { FRUIT, initPhysics, ROCK, ROOM, TICKS_PER_SECOND, World } from '../src/sim/world.ts';
 import type { ThingSpec } from '../src/sim/world.ts';
@@ -370,8 +370,8 @@ describe('room files', () => {
     expect(specs.length).toBe(3);
     expect(specs[0].form).toBe('box');
     expect(specs[0].colour).toBe('grey');
-    expect(specs[0].hw).toBeLessThanOrEqual(400);
-    expect(specs[0].hh).toBeGreaterThanOrEqual(4);
+    expect(specs[0].hw).toBeLessThanOrEqual(SIZE_LIMITS.max);
+    expect(specs[0].hh).toBeGreaterThanOrEqual(SIZE_LIMITS.min);
     expect(specs[0].name.length).toBeLessThanOrEqual(40);
     expect(specs[0]).not.toHaveProperty('script');
     run(world, 2);

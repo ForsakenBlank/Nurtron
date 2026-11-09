@@ -1,22 +1,24 @@
 // everything the player's mouse and keyboard do to the room: the hand, the shape and part tools, wiring, selecting,
 // moving, the R rotation circle, copy and paste, undo. it only changes the world through the world's own methods.
+import { newDecor } from '../sim/decor.ts';
+import type { Decor } from '../sim/decor.ts';
 import { History } from '../sim/edits.ts';
 import type { Snapshot } from '../sim/edits.ts';
-import { formatValue, isPartKind, newPart, PART_INFO, parseValue, portsOf, portWorld, whereOf } from '../sim/parts.ts';
+import { areaPart, formatValue, isPartKind, newPart, PART_INFO, parseValue, portsOf, portWorld, sizedPart, whereOf } from '../sim/parts.ts';
 import type { PartKind, Port } from '../sim/parts.ts';
 import { SIZE_LIMITS } from '../sim/room-file.ts';
 import type { Colour } from '../sim/senses.ts';
 import { boundingRadius, containsPoint } from '../sim/shapes.ts';
 import type { Form } from '../sim/shapes.ts';
-import { ROOM } from '../sim/world.ts';
+import { AREA, AREA_MIDDLE, BODY_ROOM } from '../sim/world.ts';
 import type { Creature, RoomData, Thing, ThingSpec, World } from '../sim/world.ts';
 import { kindOf, wirePoints } from './circuit-view.ts';
 import type { Wiring } from './circuit-view.ts';
-import type { Ghost, Gizmo, Overlay, Scene } from './scene.ts';
+import type { Ghost, Gizmo, Overlay, Scene, View } from './scene.ts';
 
 const SHAPE_TOOLS = ['circle', 'box', 'triangle', 'hexagon', 'plank'] as const;
 type ShapeTool = (typeof SHAPE_TOOLS)[number];
-export type Tool = 'hand' | 'wire' | ShapeTool | PartKind;
+export type Tool = 'hand' | 'wire' | 'decor' | ShapeTool | PartKind;
 const isShapeTool = (tool: Tool): tool is ShapeTool => SHAPE_TOOLS.includes(tool as ShapeTool);
 
 const SNAP_ANGLE = Math.PI / 12; // 15 degrees, where the gridlines are on the rotation circle
@@ -24,6 +26,8 @@ const SNAP_GRID = 20;
 const CLICK_DISTANCE = 4; // screen pixels the mouse can move and it still counts as a click
 const GIZMO_PADDING = 34;
 const DOUBLE_CLICK_MS = 350;
+const HEADER = 22; // how tall the strip is that you grab a big area part by
+const HANDLE = 8; // screen pixels around a resize handle that still count
 
 const NEW_SHAPES: Record<ShapeTool, { name: string; form: Form; hw: number; hh: number; fixed: boolean }> = {
   circle: { name: 'Circle', form: 'circle', hw: 20, hh: 20, fixed: false },
@@ -42,7 +46,9 @@ type Press =
   | { kind: 'box'; x1: number; y1: number; x2: number; y2: number; add: boolean }
   | { kind: 'wire'; wiring: Wiring }
   | { kind: 'place'; x1: number; y1: number; x2: number; y2: number; moved: boolean }
-  | { kind: 'rotate'; centreX: number; centreY: number; start: number; turn: number; before: Snapshot; bases: Map<number, { x: number; y: number; angle: number }> };
+  | { kind: 'rotate'; centreX: number; centreY: number; start: number; turn: number; before: Snapshot; bases: Map<number, { x: number; y: number; angle: number }> }
+  | { kind: 'resize'; id: number; sx: number; sy: number; anchorX: number; anchorY: number; angle: number; before: Snapshot }
+  | { kind: 'paint'; before: Snapshot; ids: number[] };
 
 export interface EditorEvents {
   changed(): void; // what's selected or which tool changed, so buttons and hints can update
@@ -59,6 +65,7 @@ export interface EditorEvents {
 
 export class Editor {
   tool: Tool = 'hand';
+  decor: Decor | null = null; // which decoration the Decor tool puts down
   colour: Colour = 'blue';
   newFixed = false;
   selected = new Set<number>();
@@ -104,14 +111,33 @@ export class Editor {
     return this.scene.view === 'body';
   }
 
+  get inArea(): boolean {
+    return this.scene.view === 'area';
+  }
+
+  // whose build area is being looked at, if one is
+  get areaOwner(): number | null {
+    return this.inArea ? this.scene.area : null;
+  }
+
   // whether this is on the canvas being looked at
   private here(t: Thing): boolean {
-    return !!t.inBody === this.inBody && (!this.inBody || t.owner === this.world.focusId);
+    if (this.inArea) return t.area === this.scene.area || t.id === this.scene.area;
+    return !!t.inBody === this.inBody && t.area === undefined && (!this.inBody || t.owner === this.world.focusId);
+  }
+
+  // where it is on the canvas being looked at. in its own build area, a thing stands still in the middle
+  private placed(t: Thing): Thing {
+    return this.inArea && t.id === this.scene.area ? { ...t, ...AREA_MIDDLE, angle: 0 } : t;
   }
 
   // the bottom of the canvas being looked at
   private get floor(): number {
-    return this.inBody ? ROOM.floor : this.world.size.floor;
+    return this.inBody ? BODY_ROOM.floor : this.inArea ? AREA.floor : this.world.size.floor;
+  }
+
+  private get canvasSize(): { width: number; height: number } {
+    return this.inBody ? BODY_ROOM : this.inArea ? AREA : this.world.size;
   }
 
   // looking at a different creature
@@ -126,11 +152,20 @@ export class Editor {
   // the room and the inside of the creature only have some tools in common
   allows(tool: Tool): boolean {
     if (tool === 'hand' || tool === 'wire') return true;
-    if (isShapeTool(tool)) return !this.inBody;
+    if (isShapeTool(tool) || tool === 'decor') return !this.inBody && !this.inArea;
+    // a build area isn't anywhere in the room, so nothing that's about a place in the room goes in one
+    if (this.inArea) return PART_INFO[tool].where !== 'body' && tool !== 'sensor' && tool !== 'zone' && tool !== 'start';
     return PART_INFO[tool].where === 'both' || PART_INFO[tool].where === (this.inBody ? 'body' : 'room');
   }
 
-  setView(view: 'room' | 'body'): void {
+  // a thing's own build area, with just it in the middle, for the parts that make it work
+  enterArea(id: number): void {
+    const t = this.world.thing(id);
+    if (!t || t.part || t.inBody || t.area !== undefined) return;
+    this.setView('area', id);
+  }
+
+  setView(view: View, area: number | null = null): void {
     this.press = { kind: 'none' };
     this.selected.clear();
     this.gizmoOn = false;
@@ -138,13 +173,19 @@ export class Editor {
     this.hoverWire = null;
     this.hoverPort = null;
     this.events.closeProperties();
-    this.scene.setView(view);
+    this.scene.setView(view, area);
     this.syncCursor();
     this.events.viewChanged();
     this.events.changed();
   }
 
   // ---- selecting and picking tools ----
+
+  // puts down this decoration with each click. blocks paint in a grid as you drag
+  setDecor(d: Decor): void {
+    this.decor = d;
+    this.setTool('decor');
+  }
 
   setTool(tool: Tool): void {
     if (!this.allows(tool)) return;
@@ -171,6 +212,8 @@ export class Editor {
 
   // things can vanish by themselves when eaten, so the selection is checked every frame
   private pruneSelection(): void {
+    // a build area whose thing has gone has nothing to show
+    if (this.inArea && !this.world.thing(this.scene.area)) this.setView('room');
     let changed = false;
     for (const id of this.selected) {
       if (!this.world.thing(id)) {
@@ -201,6 +244,7 @@ export class Editor {
       ghost: this.ghost(),
       box: this.press.kind === 'box' ? this.press : null,
       gizmo: this.gizmo(),
+      handles: this.handles().map((h) => ({ x: h.x, y: h.y })),
       wires: {
         wiring: this.press.kind === 'wire' ? this.press.wiring : null,
         hoverWire: this.hoverWire,
@@ -209,16 +253,35 @@ export class Editor {
         shapePorts: this.shapePorts(),
         inBody: this.inBody,
         owner: this.world.focusId,
+        area: this.areaOwner,
         playing: this.playing,
       },
     };
   }
 
-  private shapeFromPress(tool: ShapeTool | PartKind, x1: number, y1: number, x2: number, y2: number, moved: boolean, snap: boolean): Ghost {
+  // where a block goes: in a grid of its own size, lined up with the floor, so blocks sit snugly next to each other
+  private blockSpot(x: number, y: number): { x: number; y: number } | null {
+    const d = this.decor;
+    if (this.tool !== 'decor' || d?.group !== 'Blocks') return null;
+    const w = d.hw * 2;
+    const h = d.hh * 2;
+    return { x: Math.floor(x / w) * w + d.hw, y: this.floor - (Math.floor((this.floor - y) / h) * h + d.hh) };
+  }
+
+  private shapeFromPress(tool: ShapeTool | PartKind | 'decor', x1: number, y1: number, x2: number, y2: number, moved: boolean, snap: boolean): Ghost {
+    if (tool === 'decor') {
+      const d = this.decor as Decor;
+      const at = this.blockSpot(x2, y2) ?? (moved || this.press.kind !== 'place' ? { x: x2, y: y2 } : { x: x1, y: y1 });
+      const sized = moved && d.group !== 'Blocks';
+      const clamp = (v: number): number => Math.max(SIZE_LIMITS.min, Math.min(SIZE_LIMITS.max, v));
+      // dragging out a decoration makes it that big, keeping its shape
+      const scale = sized ? clamp(Math.abs(x2 - x1) / 2) / d.hw : 1;
+      return { form: d.form, hw: d.hw * scale, hh: d.hh * scale, x: sized ? (x1 + x2) / 2 : at.x, y: sized ? y1 + (d.hh * scale) : at.y, angle: 0, colour: d.colour };
+    }
     const base = isShapeTool(tool) ? NEW_SHAPES[tool] : newPart(tool, 0, 0);
     const colour = isShapeTool(tool) ? this.colour : PART_INFO[tool].colour;
-    // parts are a set size, apart from a sensor, which is an area you draw
-    const sizes = isShapeTool(tool) || tool === 'sensor' || tool === 'zone';
+    // parts are a set size, apart from areas like a sensor, which you draw
+    const sizes = isShapeTool(tool) || areaPart(tool);
     const clamp = (v: number): number => Math.max(SIZE_LIMITS.min, Math.min(SIZE_LIMITS.max, v));
     let { hw, hh } = base;
     let x = x2;
@@ -286,18 +349,34 @@ export class Editor {
     return { x: rotating?.centreX ?? x, y: rotating?.centreY ?? y, radius: radius + GIZMO_PADDING / this.scene.zoom, angle, active: !!rotating };
   }
 
-  // a shape shows its Touched output when you're wiring, or it's selected, or wired up already, or the mouse is close by
+  // the corners of the one thing selected, to drag to change its size
+  private handles(): { x: number; y: number; sx: number; sy: number }[] {
+    if (this.gizmoOn || this.selected.size !== 1 || this.tool !== 'hand' || this.playing) return [];
+    const t = this.world.thing([...this.selected][0]);
+    if (!t || !this.here(t) || t.id === this.areaOwner || (t.part && !sizedPart(t.part.kind))) return [];
+    const cos = Math.cos(t.angle);
+    const sin = Math.sin(t.angle);
+    return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => ({ x: t.x + sx * t.hw * cos - sy * t.hh * sin, y: t.y + sx * t.hw * sin + sy * t.hh * cos, sx, sy }));
+  }
+
+  // a shape shows its outputs when you're wiring, or it's selected, or wired up already, or the mouse is close by
   private shapePorts(): Set<number> {
     const ids = new Set<number>();
-    if (this.inBody || this.playing) return ids;
+    if (this.playing) return ids;
+    // in a build area, the thing in the middle is what everything wires to
+    if (this.inArea) {
+      if (this.scene.area !== null) ids.add(this.scene.area);
+      return ids;
+    }
+    if (this.inBody) return ids;
     const wiring = this.press.kind === 'wire' && this.press.wiring.kind === 'pulse' && this.press.wiring.dir === 'in';
     const spot = this.hoverSpot;
     for (const t of this.world.things) {
-      if (t.part || t.inBody) continue;
+      if (t.part || t.inBody || t.bullet) continue;
       const near = spot && Math.hypot(spot.x - t.x, spot.y - t.y) < boundingRadius(t) + 34;
       if (this.tool === 'wire' || wiring || near || this.selected.has(t.id)) ids.add(t.id);
     }
-    for (const w of this.world.wires) if (w.out === 'touched') ids.add(w.from);
+    for (const w of this.world.wires) if (!this.world.thing(w.from)?.part && this.world.thing(w.from)?.area === undefined) ids.add(w.from);
     return ids;
   }
 
@@ -317,12 +396,26 @@ export class Editor {
   thingAt(x: number, y: number): Thing | undefined {
     const margin = 4 / this.scene.zoom;
     const things = this.world.things;
-    // whatever's actually in the room comes first, then parts on the wall, then the big see-through sensors
-    const rank = (t: Thing): number => (!t.part ? 0 : t.part.kind === 'sensor' || t.part.kind === 'zone' ? 2 : 1);
+    // whatever's actually in the room comes first, then parts on the wall, then the big see-through areas, which you
+    // can only grab by their header, so whatever you build inside one is easy to get at
+    const rank = (t: Thing): number => (!t.part ? 0 : areaPart(t.part.kind) ? 2 : 1);
     for (let want = 0; want <= 2; want++) {
-      for (let i = things.length - 1; i >= 0; i--) if (this.here(things[i]) && rank(things[i]) === want && containsPoint(things[i], x, y, margin)) return things[i];
+      for (let i = things.length - 1; i >= 0; i--) {
+        const t = things[i];
+        if (!this.here(t) || t.bullet || rank(t) !== want) continue;
+        if (want === 2 ? this.onHeader(t, x, y) : containsPoint(this.placed(t), x, y, margin)) return t;
+      }
     }
     return undefined;
+  }
+
+  private onHeader(t: Thing, x: number, y: number): boolean {
+    const cos = Math.cos(-t.angle);
+    const sin = Math.sin(-t.angle);
+    const lx = (x - t.x) * cos - (y - t.y) * sin;
+    const ly = (x - t.x) * sin + (y - t.y) * cos;
+    const tall = Math.max(HEADER, 14 / this.scene.zoom);
+    return Math.abs(lx) <= t.hw && ly >= -t.hh - 2 && ly <= -t.hh + tall;
   }
 
   // the port under the mouse, with a bit of slack, because they're small
@@ -334,10 +427,10 @@ export class Editor {
     const shapesCount = wiring || this.tool === 'wire' || !this.thingAt(x, y);
     const live = shapesCount ? this.shapePorts() : new Set<number>();
     for (const thing of this.world.things) {
-      if (!this.here(thing)) continue;
+      if (!this.here(thing) || thing.bullet) continue;
       if (!thing.part && !wiring && !live.has(thing.id)) continue;
       for (const port of portsOf(thing)) {
-        const at = portWorld(thing, port);
+        const at = portWorld(this.placed(thing), port);
         const distance = Math.hypot(at.x - x, at.y - y);
         if (distance <= bestDistance) {
           best = { thing, port };
@@ -354,8 +447,9 @@ export class Editor {
     let bestDistance = reach;
     for (const wire of this.world.wires) {
       const from = this.world.thing(wire.from);
-      if (!from || !this.here(from)) continue;
-      const points = wirePoints(this.world, wire);
+      const to = this.world.thing(wire.to);
+      if (!from || !to || !this.here(from) || !this.here(to)) continue;
+      const points = wirePoints(this.world, wire, (t) => this.placed(t));
       for (let i = 1; i < points.length; i++) {
         const a = points[i - 1];
         const b = points[i];
@@ -374,7 +468,7 @@ export class Editor {
 
   // the one under the mouse. the one you're looking at wins if they're standing in the same place
   onCreature(x: number, y: number): Creature | null {
-    if (this.inBody) return null;
+    if (this.inBody || this.inArea) return null;
     const hit = (c: Creature): boolean => Math.abs(x - c.x) <= 32 && y <= c.y + 4 && y >= c.y - 76;
     return hit(this.world.creature) ? this.world.creature : (this.world.creatures.find(hit) ?? null);
   }
@@ -406,6 +500,11 @@ export class Editor {
     if (e.button === 2) return this.rightClick(e, p);
     if (e.button !== 0) return;
 
+    if (this.tool === 'decor' && this.blockSpot(p.x, p.y)) {
+      this.press = { kind: 'paint', before: this.history.capture(this.world, []), ids: [] };
+      this.paintBlock(this.press, p.x, p.y);
+      return;
+    }
     if (this.tool !== 'hand' && this.tool !== 'wire') {
       this.press = { kind: 'place', x1: p.x, y1: p.y, x2: p.x, y2: p.y, moved: false };
       return;
@@ -418,6 +517,11 @@ export class Editor {
       return;
     }
     if (this.tool === 'wire') return;
+
+    // a corner of the one thing selected changes its size
+    const reach = HANDLE / this.scene.zoom;
+    const handle = this.handles().find((h) => Math.abs(h.x - p.x) <= reach && Math.abs(h.y - p.y) <= reach);
+    if (handle) return this.startResize(handle);
 
     // the rotation circle takes any press inside or close around it
     const gizmo = this.gizmo();
@@ -548,7 +652,22 @@ export class Editor {
       case 'rotate':
         this.rotate(press, p, e.shiftKey);
         return;
+      case 'resize':
+        this.resize(press, p, e.shiftKey);
+        return;
+      case 'paint':
+        this.paintBlock(press, p.x, p.y);
+        return;
     }
+  }
+
+  // a block in this grid square, unless there's one there already
+  private paintBlock(press: Extract<Press, { kind: 'paint' }>, x: number, y: number): void {
+    const d = this.decor;
+    const at = this.blockSpot(x, y);
+    if (!d || !at || at.y < d.hh || at.y > this.floor - d.hh + 1) return;
+    if (this.world.things.some((t) => this.here(t) && !t.part && containsPoint(t, at.x, at.y))) return;
+    press.ids.push(this.world.add(newDecor(d, at.x, at.y)).id);
   }
 
   private hovering(e: PointerEvent, p: { x: number; y: number }): void {
@@ -581,6 +700,12 @@ export class Editor {
       this.events.hover(e, null, null);
       return;
     }
+    const reach = HANDLE / this.scene.zoom;
+    if (this.handles().some((h) => Math.abs(h.x - p.x) <= reach && Math.abs(h.y - p.y) <= reach)) {
+      this.canvas.style.cursor = 'nwse-resize';
+      this.events.hoverNote(e, 'Resize', 'Drag to change its size. Hold Shift to keep its shape.');
+      return;
+    }
     const creature = this.onCreature(p.x, p.y);
     const thing = creature ? undefined : this.thingAt(p.x, p.y);
     const gizmo = this.gizmo();
@@ -598,8 +723,16 @@ export class Editor {
       if (Math.hypot(e.clientX - press.startX, e.clientY - press.startY) <= CLICK_DISTANCE) return;
       press.moved = true;
       if (!this.selected.has(press.id)) this.select([press.id]);
-      press.before = this.history.capture(this.world, this.selected);
-      for (const t of this.selectedThings()) {
+      // a group box carries whatever's inside it along with it
+      const moving = new Set([...this.selected].filter((id) => id !== this.areaOwner));
+      for (const box of this.selectedThings()) {
+        if (box.part?.kind !== 'frame') continue;
+        for (const t of this.world.things) if (t.id !== box.id && this.here(t) && t.id !== this.areaOwner && containsPoint(box, t.x, t.y)) moving.add(t.id);
+      }
+      press.before = this.history.capture(this.world, moving);
+      for (const id of moving) {
+        const t = this.world.thing(id);
+        if (!t) continue;
         press.offsets.set(t.id, { x: t.x - press.grabX, y: t.y - press.grabY });
         this.world.hold(t.id);
       }
@@ -667,6 +800,14 @@ export class Editor {
       case 'rotate':
         this.finishRotate(press);
         return;
+      case 'resize':
+        this.world.release(press.id);
+        this.history.commit('Resize', this.world, press.before);
+        this.syncCursor();
+        return;
+      case 'paint':
+        this.history.commit(press.ids.length > 1 ? 'Add blocks' : `Add ${this.decor?.name.toLowerCase() ?? 'block'}`, this.world, press.before, press.ids);
+        return;
     }
   }
 
@@ -715,7 +856,7 @@ export class Editor {
     const right = Math.max(press.x1, press.x2);
     const top = Math.min(press.y1, press.y2);
     const bottom = Math.max(press.y1, press.y2);
-    const inside = this.world.things.filter((t) => this.here(t) && t.x >= left && t.x <= right && t.y >= top && t.y <= bottom).map((t) => t.id);
+    const inside = this.world.things.filter((t) => this.here(t) && t.id !== this.areaOwner && t.x >= left && t.x <= right && t.y >= top && t.y <= bottom).map((t) => t.id);
     if (inside.length) this.select(press.add ? [...this.selected, ...inside] : inside);
   }
 
@@ -724,10 +865,16 @@ export class Editor {
     const shape = this.shapeFromPress(this.tool, press.x1, press.y1, press.x2, press.y2, press.moved, this.shiftDown);
     // never start it stuck in the floor
     const y = Math.min(this.floor - Math.max(shape.hh, Math.abs(Math.sin(shape.angle)) * shape.hw) - 1, shape.y);
+    if (this.tool === 'decor') {
+      if (!this.decor) return;
+      const made = newDecor(this.decor, shape.x, this.decor.group === 'Sky' ? shape.y : y);
+      this.addThing({ ...made, hw: shape.hw, hh: shape.hh });
+      return;
+    }
     if (isPartKind(this.tool)) {
       const part = this.tool;
       const made = newPart(part, shape.x, y);
-      this.addThing({ ...made, name: this.freeName(made), hw: shape.hw, hh: shape.hh, inBody: this.inBody || undefined });
+      this.addThing({ ...made, name: this.freeName(made), hw: shape.hw, hh: shape.hh, inBody: this.inBody || undefined, area: this.areaOwner ?? undefined });
       // you nearly always want to wire it up next, and a part's ports only work with the hand
       this.setTool('hand');
       return;
@@ -839,6 +986,40 @@ export class Editor {
     }
   }
 
+  private startResize(handle: { sx: number; sy: number }): void {
+    const t = this.world.thing([...this.selected][0]);
+    if (!t) return;
+    const cos = Math.cos(t.angle);
+    const sin = Math.sin(t.angle);
+    // the opposite corner stays where it is
+    const ax = t.x - handle.sx * t.hw * cos + handle.sy * t.hh * sin;
+    const ay = t.y - handle.sx * t.hw * sin - handle.sy * t.hh * cos;
+    const before = this.history.capture(this.world, [t.id]);
+    this.world.hold(t.id);
+    this.press = { kind: 'resize', id: t.id, sx: handle.sx, sy: handle.sy, anchorX: ax, anchorY: ay, angle: t.angle, before };
+  }
+
+  private resize(press: Extract<Press, { kind: 'resize' }>, p: { x: number; y: number }, keepShape: boolean): void {
+    const t = this.world.thing(press.id);
+    if (!t) return;
+    const cos = Math.cos(press.angle);
+    const sin = Math.sin(press.angle);
+    const dx = p.x - press.anchorX;
+    const dy = p.y - press.anchorY;
+    const clamp = (v: number): number => Math.max(SIZE_LIMITS.min, Math.min(SIZE_LIMITS.max, v));
+    let hw = clamp(((dx * cos + dy * sin) * press.sx) / 2);
+    let hh = clamp(((-dx * sin + dy * cos) * press.sy) / 2);
+    if (t.form === 'circle' || keepShape) {
+      const ratio = t.hh / t.hw;
+      hw = t.form === 'circle' ? Math.max(hw, hh) : hw;
+      hh = t.form === 'circle' ? hw : clamp(hw * ratio);
+    }
+    const x = press.anchorX + press.sx * hw * cos - press.sy * hh * sin;
+    const y = press.anchorY + press.sx * hw * sin + press.sy * hh * cos;
+    this.world.update(t.id, { hw, hh });
+    this.world.moveHeld(t.id, x, y);
+  }
+
   private finishRotate(press: Extract<Press, { kind: 'rotate' }>): void {
     for (const id of press.bases.keys()) this.world.release(id);
     this.history.commit('Rotate', this.world, press.before);
@@ -898,7 +1079,7 @@ export class Editor {
     } else if (key === 'g') {
       if (this.selected.size > 0) this.events.packageSelected();
       else this.events.message('Select some parts first, then press G to package them as a tool.');
-    } else if (key === 'f' && !this.inBody) {
+    } else if (key === 'f' && !this.inBody && !this.inArea) {
       this.scene.centreOn(this.world.creature.x, this.world.creature.y);
     } else if (key === 'delete' || key === 'backspace') {
       this.deleteSelected();
@@ -914,7 +1095,7 @@ export class Editor {
   private escape(): void {
     if (this.gizmoOn) this.gizmoOn = false;
     else if (this.tool !== 'hand') this.setTool('hand');
-    else if (this.selected.size === 0 && this.inBody) this.setView('room');
+    else if (this.selected.size === 0 && (this.inBody || this.inArea)) this.setView('room');
     else this.select([]);
     this.events.closeProperties();
     this.events.changed();
@@ -938,25 +1119,32 @@ export class Editor {
 
   deleteSelected(): void {
     if (this.selected.size === 0) return;
-    const before = this.history.capture(this.world, this.selected);
-    for (const id of this.selected) this.world.remove(id);
+    // a thing's build area goes with it, and the thing in the middle of its own build area stays
+    const going = new Set([...this.selected].filter((id) => id !== this.areaOwner));
+    for (const t of this.world.things) if (t.area !== undefined && going.has(t.area)) going.add(t.id);
+    const before = this.history.capture(this.world, going);
+    for (const id of going) this.world.remove(id);
     this.history.commit(this.selected.size > 1 ? 'Delete things' : 'Delete', this.world, before);
     this.select([]);
     this.events.closeProperties();
   }
 
   copy(): void {
-    if (this.selected.size > 0) this.clipboard = this.world.roomData(this.selected);
+    if (this.selected.size === 0) return;
+    // a thing's build area comes with it
+    const ids = new Set([...this.selected].filter((id) => id !== this.areaOwner));
+    for (const t of this.world.things) if (t.area !== undefined && ids.has(t.area)) ids.add(t.id);
+    if (ids.size > 0) this.clipboard = this.world.roomData(ids);
   }
 
   paste(): void {
     if (!this.clipboard) return;
     const nudge = 40;
     const before = this.history.capture(this.world, []);
-    const ids = this.world.addRoom(this.forHere(this.clipboard), nudge, -nudge);
+    const ids = this.world.addRoom(this.forHere(this.clipboard), nudge, -nudge, this.areaOwner ?? undefined);
     this.history.commit('Paste', this.world, before, ids);
-    // the next paste lands a step further on, instead of exactly on top of this one
-    this.clipboard = { ...this.clipboard, things: this.clipboard.things.map((s) => ({ ...s, x: Math.min((this.inBody ? ROOM.width : this.world.size.width) - 10, s.x + nudge), y: Math.max(10, (s.y ?? this.floor) - nudge) })) };
+    // the next paste lands a step further on, instead of exactly on top of this one. what's in a build area stays put
+    this.clipboard = { ...this.clipboard, things: this.clipboard.things.map((s) => (s.area !== undefined ? s : { ...s, x: Math.min(this.canvasSize.width - 10, s.x + nudge), y: Math.max(10, (s.y ?? this.floor) - nudge) })) };
     this.select(ids);
     this.gizmoOn = false;
   }
@@ -964,8 +1152,9 @@ export class Editor {
   // what's been copied, leaving out what can't go on this canvas, and with the wires renumbered to match
   private forHere(room: RoomData): RoomData {
     const allowed = (t: ThingSpec): boolean => {
-      if (!t.part) return !this.inBody;
+      if (!t.part) return !this.inBody && !this.inArea;
       const where = whereOf(t.part);
+      if (this.inArea) return where !== 'body' && t.part.kind !== 'sensor' && t.part.kind !== 'zone' && t.part.kind !== 'start';
       return where === 'both' || where === (this.inBody ? 'body' : 'room');
     };
     const moved = new Map<number, number>();
@@ -975,6 +1164,13 @@ export class Editor {
       moved.set(i, things.length);
       things.push({ ...t, inBody: this.inBody || undefined, owner: undefined });
     });
+    // build areas go by position, which has to follow anything left out. one whose thing was left out comes out with the rest
+    for (const t of things) {
+      if (t.area === undefined) continue;
+      const at = this.inArea || this.inBody ? undefined : moved.get(t.area);
+      if (at === undefined) delete t.area;
+      else t.area = at;
+    }
     const wires = room.wires.filter((w) => moved.has(w.from) && moved.has(w.to)).map((w) => ({ ...w, from: moved.get(w.from) as number, to: moved.get(w.to) as number }));
     return { things, wires, textures: room.textures };
   }
@@ -988,7 +1184,7 @@ export class Editor {
   // a whole little circuit, with its top left corner placed so it's in view
   addCircuit(label: string, room: RoomData, x: number, y: number): void {
     const before = this.history.capture(this.world, []);
-    const ids = this.world.addRoom(this.forHere(room), x, y);
+    const ids = this.world.addRoom(this.forHere(room), x, y, this.areaOwner ?? undefined);
     this.history.commit(`Add ${label.toLowerCase()}`, this.world, before, ids);
     this.select(ids);
   }
@@ -1037,16 +1233,18 @@ export class Editor {
   }
 
   hint(): string {
+    if (this.tool === 'decor' && this.decor) return this.decor.group === 'Blocks' ? `Click or drag to paint ${this.decor.name.toLowerCase()} blocks. They line up in a grid. Esc or right-click when done.` : `Click to put down a ${this.decor.name.toLowerCase()}, or drag to make it bigger. Esc or right-click when done.`;
+    if (this.inArea && this.tool === 'hand') return `This is ${this.world.thing(this.areaOwner)?.name ?? 'its'} build area. Parts in here work on the thing in the middle unless you attach them to something else, so a Mover in here moves it. Wire straight from its outputs, like Touched. Esc goes back.`;
     if (this.inBody && this.tool === 'hand') return "This is inside your creature, and it keeps running while you look. Plug any value into a Drive socket and it will care about it. Give parts change Labels in here by name. Esc goes back.";
     if (this.tool === 'wire') return 'Drag from one port to another to connect them. Round is a value, a diamond is a pulse. Right-click a wire to remove it. Esc when done.';
-    if (isPartKind(this.tool)) return this.tool === 'sensor' || this.tool === 'zone' ? 'Click to place it, or drag to choose the area it covers. Right-click its header for its settings.' : `Click to place. ${PART_INFO[this.tool].help}`;
+    if (isPartKind(this.tool)) return areaPart(this.tool) ? 'Click to place it, or drag to choose the area it covers. Grab it by its header to move it, and drag its corners to resize it.' : `Click to place. ${PART_INFO[this.tool].help}`;
     if (this.tool !== 'hand') {
       return this.tool === 'plank'
         ? 'Click to place a plank, or drag from one end to the other to make a ramp. Hold Shift to snap the slope. Esc when done.'
         : 'Click to place, or drag to choose the size. Esc when done.';
     }
     if (this.gizmoOn) return 'Drag around the circle to rotate. It snaps to the lines, or hold Shift for free. R or Esc when done.';
-    if (this.selected.size > 0) return 'Drag to move. R rotates, Delete removes, Ctrl+D duplicates, G packages it as a tool. Right-click for properties. Drag from a port to wire it up.';
+    if (this.selected.size > 0) return 'Drag to move, or drag a corner to resize. R rotates, Delete removes, Ctrl+D duplicates, G packages it as a tool. Right-click for properties and its build area. Drag from a port to wire it up.';
     return 'Click your creature to pet, right-click to slap, drag to carry it, double-click to look inside. Click things to select. Drag empty space to look around, scroll to zoom, Shift+drag to select several. F finds your creature, 0 shows the whole room.';
   }
 }

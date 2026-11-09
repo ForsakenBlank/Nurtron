@@ -16,8 +16,12 @@ import type { PackagedTool } from '../sim/packager.ts';
 import { parseRoom, saveRoom } from '../sim/room-file.ts';
 import { Rng } from '../sim/rng.ts';
 import { COLOURS as COLOUR_NAMES, describe } from '../sim/senses.ts';
-import { FRUIT, initPhysics, MOST_CREATURES, needOf, ROCK, ROOM, SIZE_RANGE, TICKS_PER_SECOND, World } from '../sim/world.ts';
+import { AREA, BODY_ROOM, FRUIT, initPhysics, MOST_CREATURES, needOf, ROCK, ROOM, SIZE_RANGE, storeKey, TICKS_PER_SECOND, World } from '../sim/world.ts';
 import type { Creature, Drive, RoomData, Thing, ThingSpec } from '../sim/world.ts';
+import { DECOR, DECOR_GROUPS } from '../sim/decor.ts';
+import type { DecorGroup } from '../sim/decor.ts';
+import { cleanRoom } from '../sim/room-file.ts';
+import { canvasPen, DECOR_ART } from './decor-art.ts';
 import { parseTrial, saveTrial } from '../sim/trial-file.ts';
 import { openWorld, parseWorld, saveWorld } from '../sim/world-file.ts';
 import { BrainView } from './brain-view.ts';
@@ -44,6 +48,7 @@ import type { WorldEntry } from './worlds.ts';
 
 const SAVE_KEY = 'nurtron.world';
 const TOOLS_KEY = 'nurtron.tools';
+const ASSETS_KEY = 'nurtron.assets';
 const PANEL_KEY = 'nurtron.panel';
 const PREFS_KEY = 'nurtron.prefs';
 const SIZES = [
@@ -199,6 +204,8 @@ async function boot(): Promise<void> {
       </header>
       <main>
         <section id="stage">
+          <div id="game-hud" hidden></div>
+          <div id="choice-box" hidden><div id="choice-title"></div><div id="choice-options"></div></div>
           <div id="hud">
             <div class="mood" id="mood"></div>
             <div id="bars"></div>
@@ -288,12 +295,14 @@ async function boot(): Promise<void> {
         <span class="divider room-only"></span>
         <span class="muted room-only">Add</span>
         <div class="group room-only" id="add"></div>
+        <button id="decor-open" class="room-only" title="Blocks, trees, torches, chests, items, food and enemies, ready to put down">Decor</button>
         <span class="divider"></span>
         <span class="muted">Parts</span>
         <div class="group" id="parts"></div>
         <span class="divider"></span>
         <button id="package" title="Turn what's selected into your own reusable tool (G)">Package</button>
         <div class="group" id="my-tools"></div>
+        <button id="assets-open" class="room-only" title="Things you saved with Save as asset in their properties, to put down in any world">My assets</button>
         <span class="spacer"></span>
         <div class="group">
           <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
@@ -394,6 +403,11 @@ async function boot(): Promise<void> {
       </div>
     </div>
     <div id="tool-menu" class="pop-menu" role="menu"></div>
+    <div id="asset-menu" class="pop-menu" role="menu"></div>
+    <div id="decor-menu" class="pop-menu" role="dialog" aria-label="Decorations">
+      <div id="decor-tabs"></div>
+      <div id="decor-grid"></div>
+    </div>
     <div id="help" role="dialog" aria-label="Keyboard shortcuts">
       <div class="prop-head"><b>Keyboard shortcuts</b><button id="help-close" class="prop-close" aria-label="Close">✕</button></div>
       <div class="help-grid">
@@ -584,6 +598,8 @@ async function boot(): Promise<void> {
       pictureFile.click();
     },
     packageThese: (ids) => packager.open(ids),
+    saveAsset: (ids) => saveAsset(ids),
+    message: toast,
   });
   const packager = new PackagePanel($('packager'), () => world, (tool) => {
     tools.push(tool);
@@ -624,8 +640,8 @@ async function boot(): Promise<void> {
   $('body-open').addEventListener('click', () => editor.setView('body'));
   $('body-close').addEventListener('click', () => editor.setView('room'));
   function syncView(): void {
-    $('app').classList.toggle('in-body', editor.inBody);
-    $('body-title').textContent = `Inside ${world.creature.name}`;
+    $('app').classList.toggle('in-body', editor.inBody || editor.inArea);
+    $('body-title').textContent = editor.inArea ? `${world.thing(editor.areaOwner)?.name ?? 'Its'}'s build area` : `Inside ${world.creature.name}`;
     $('panel-title').textContent = `${world.creature.name}'s mind`;
   }
 
@@ -810,10 +826,10 @@ async function boot(): Promise<void> {
     const rect = scene.app.canvas.getBoundingClientRect();
     const middle = scene.toWorld(rect.width / 2, rect.height / 2);
     let x = Math.max(60, middle.x - width / 2);
-    const edge = editor.inBody ? ROOM : world.size;
+    const edge = editor.inBody ? BODY_ROOM : editor.inArea ? AREA : world.size;
     let y = Math.max(60, Math.min(middle.y - height / 2, edge.floor - height - 40));
     // it goes somewhere clear, so a second one doesn't land on top of the first
-    const clear = (): boolean => !world.things.some((t) => t.part && !!t.inBody === editor.inBody && t.x > x - 100 && t.x < x + width + 100 && t.y > y - 60 && t.y < y + height + 60);
+    const clear = (): boolean => !world.things.some((t) => t.part && !!t.inBody === editor.inBody && (t.area ?? null) === editor.areaOwner && t.x > x - 100 && t.x < x + width + 100 && t.y > y - 60 && t.y < y + height + 60);
     for (let tries = 0; tries < 40 && !clear(); tries++) {
       y += height + 60;
       if (y > edge.floor - height - 40) {
@@ -841,7 +857,7 @@ async function boot(): Promise<void> {
     placeCircuit(tool.name, tool.room, width, height);
   }
   function renderTools(): void {
-    const key = `${tools.map((t) => t.name).join('|')}:${editor.inBody}`;
+    const key = `${tools.map((t) => t.name).join('|')}:${editor.inBody}:${editor.inArea}`;
     if (shelf.dataset.drawn === key) return;
     shelf.dataset.drawn = key;
     shelf.replaceChildren();
@@ -890,6 +906,214 @@ async function boot(): Promise<void> {
 
   $('undo').addEventListener('click', () => editor.undo());
   $('redo').addEventListener('click', () => editor.redo());
+
+  // decorations: a picture of each, in groups, and clicking one picks it to put down
+  const decorMenu = $('decor-menu');
+  let decorGroup: DecorGroup = 'Blocks';
+  const decorPictures = new Map<string, HTMLCanvasElement>();
+  function decorPicture(id: string): HTMLCanvasElement {
+    let canvas = decorPictures.get(id);
+    if (canvas) return canvas;
+    const d = DECOR.find((one) => one.id === id);
+    canvas = document.createElement('canvas');
+    const size = 44;
+    canvas.width = canvas.height = size * 2;
+    canvas.style.width = canvas.style.height = `${size}px`;
+    const ctx = canvas.getContext('2d');
+    if (ctx && d) {
+      ctx.scale(2, 2);
+      DECOR_ART[id]?.(canvasPen(ctx, size, d.hw, d.hh));
+    }
+    decorPictures.set(id, canvas);
+    return canvas;
+  }
+  function renderDecor(): void {
+    const tabs = $('decor-tabs');
+    tabs.replaceChildren();
+    for (const group of DECOR_GROUPS) {
+      const b = document.createElement('button');
+      b.textContent = group;
+      b.classList.toggle('on', group === decorGroup);
+      b.addEventListener('click', () => {
+        decorGroup = group;
+        renderDecor();
+      });
+      tabs.appendChild(b);
+    }
+    const grid = $('decor-grid');
+    grid.replaceChildren();
+    for (const d of DECOR.filter((one) => one.group === decorGroup)) {
+      const b = document.createElement('button');
+      b.className = 'decor-item';
+      b.classList.toggle('on', editor.tool === 'decor' && editor.decor?.id === d.id);
+      b.title = `${d.name}${d.extra?.item ? '. An item: creatures pick it up' : d.extra?.enemy ? '. An enemy, with health' : d.extra?.holds ? '. A chest: creatures take what is inside' : d.extra?.give ? '. Food' : d.solid ? '' : '. Creatures walk past it'}`;
+      b.setAttribute('aria-label', d.name);
+      const name = document.createElement('span');
+      name.textContent = d.name;
+      b.append(decorPicture(d.id), name);
+      b.addEventListener('click', () => {
+        editor.setDecor(d);
+        decorMenu.style.display = 'none';
+      });
+      grid.appendChild(b);
+    }
+  }
+  $('decor-open').addEventListener('click', () => {
+    if (decorMenu.style.display === 'grid') {
+      decorMenu.style.display = 'none';
+      return;
+    }
+    renderDecor();
+    decorMenu.style.display = 'grid';
+    const at = $('decor-open').getBoundingClientRect();
+    const box = decorMenu.getBoundingClientRect();
+    decorMenu.style.left = `${Math.max(8, Math.min(window.innerWidth - box.width - 8, at.left - 40))}px`;
+    decorMenu.style.top = `${Math.max(8, at.top - box.height - 8)}px`;
+  });
+  decorMenu.addEventListener('pointerdown', (e) => e.stopPropagation());
+
+  // your assets: anything you've saved, with its pictures, wires and build area, to put down again in any world
+  const assets = loadAssets();
+  function loadAssets(): PackagedTool[] {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(ASSETS_KEY) ?? '[]');
+      if (!Array.isArray(saved)) return [];
+      return saved.flatMap((one) => {
+        try {
+          const a = one as { name?: unknown; room?: unknown };
+          return typeof a.name === 'string' ? [{ name: a.name.slice(0, 40), room: cleanRoom(a.room, 'room') }] : [];
+        } catch {
+          return [];
+        }
+      });
+    } catch {
+      return [];
+    }
+  }
+  function keepAssets(): boolean {
+    try {
+      localStorage.setItem(ASSETS_KEY, JSON.stringify(assets));
+      return true;
+    } catch {
+      toast("There isn't room to keep that asset. Pictures take a lot of space, so try a smaller one.");
+      return false;
+    }
+  }
+  function saveAsset(ids: number[]): void {
+    const wanted = new Set(ids);
+    for (const t of world.things) if (t.area !== undefined && wanted.has(t.area)) wanted.add(t.id);
+    const room = world.roomData(wanted);
+    if (room.things.length === 0) return;
+    // it's kept with its top left corner at nothing, so it lands wherever you put it
+    const out = room.things.filter((t) => t.area === undefined);
+    const left = Math.min(...out.map((t) => t.x - t.hw));
+    const top = Math.min(...out.map((t) => (t.y ?? 0) - t.hh));
+    room.things = room.things.map((t) => (t.area !== undefined ? t : { ...t, x: t.x - left, y: (t.y ?? 0) - top }));
+    const first = world.thing(ids[0]);
+    const name = `${first?.name ?? 'Asset'}${ids.length > 1 ? ` and ${ids.length - 1} more` : ''}`.slice(0, 40);
+    assets.push({ name, room });
+    if (!keepAssets()) {
+      assets.pop();
+      return;
+    }
+    toast(`${name} is in My assets, ready to put down in any world.`);
+  }
+  const assetMenu = $('asset-menu');
+  function openAssets(): void {
+    assetMenu.replaceChildren();
+    const title = document.createElement('b');
+    title.textContent = 'My assets';
+    assetMenu.appendChild(title);
+    if (!assets.length) {
+      const none = document.createElement('div');
+      none.className = 'muted';
+      none.textContent = 'Nothing yet. Right-click anything you have built and press Save as asset.';
+      assetMenu.appendChild(none);
+    }
+    for (const asset of assets) {
+      const row = document.createElement('div');
+      row.className = 'asset-row';
+      const place = document.createElement('button');
+      place.textContent = asset.name;
+      place.title = 'Put it down where you are looking';
+      place.addEventListener('click', () => {
+        assetMenu.style.display = 'none';
+        const out = asset.room.things.filter((t) => t.area === undefined);
+        placeCircuit(asset.name, asset.room, Math.max(40, ...out.map((t) => t.x + t.hw)), Math.max(40, ...out.map((t) => (t.y ?? 0) + t.hh)));
+      });
+      const forget = document.createElement('button');
+      forget.textContent = '✕';
+      forget.title = 'Forget it';
+      forget.addEventListener('click', () => {
+        assets.splice(assets.indexOf(asset), 1);
+        keepAssets();
+        openAssets();
+      });
+      row.append(place, forget);
+      assetMenu.appendChild(row);
+    }
+    const at = $('assets-open').getBoundingClientRect();
+    assetMenu.style.display = 'grid';
+    assetMenu.style.left = `${Math.max(8, Math.min(window.innerWidth - 240, at.left))}px`;
+    assetMenu.style.top = `${Math.max(8, at.top - assetMenu.getBoundingClientRect().height - 6)}px`;
+  }
+  $('assets-open').addEventListener('click', () => (assetMenu.style.display === 'grid' ? (assetMenu.style.display = 'none') : openAssets()));
+  assetMenu.addEventListener('pointerdown', (e) => e.stopPropagation());
+  scene.app.canvas.addEventListener('pointerdown', () => {
+    decorMenu.style.display = 'none';
+    assetMenu.style.display = 'none';
+  });
+
+  // the numbers a game wants you to see: Storage that's set to show, and what your creature is carrying
+  function renderGameHud(): void {
+    const box = $('game-hud');
+    const rows: string[] = [];
+    const seen = new Set<string>();
+    for (const t of world.circuit.allParts) {
+      if (t.part?.kind !== 'storage' || t.part.shown === false) continue;
+      const key = storeKey(t.name);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(`<div class="game-row"><span>${escapeHtml(t.name)}</span><b>${escapeHtml(formatValue(world.stores[key] ?? t.part.start ?? 0))}</b></div>`);
+    }
+    const c = world.creature;
+    const carrying = Object.entries(c.inventory ?? {}).filter(([, n]) => n > 0);
+    if (carrying.length) rows.push(`<div class="game-head">${escapeHtml(c.name)} has</div>${carrying.map(([name, n]) => `<div class="game-row"><span>${escapeHtml(name)}</span><b>${n}</b></div>`).join('')}`);
+    const boosts = new Map<string, number>();
+    for (const b of c.boosts ?? []) boosts.set(b.stat, (boosts.get(b.stat) ?? 0) + b.amount);
+    if (boosts.size) rows.push(`<div class="game-head">Effects</div>${[...boosts].map(([stat, amount]) => `<div class="game-row"><span>${stat}</span><b>${amount >= 0 ? '+' : ''}${Math.round(amount * 100)}%</b></div>`).join('')}`);
+    const html = rows.join('');
+    box.hidden = html === '';
+    if (box.dataset.html !== html) {
+      box.dataset.html = html;
+      box.innerHTML = html;
+    }
+  }
+
+  // while a creature is choosing, everything else waits, and you can watch it make up its mind
+  let chose: { options: string[]; picked: number; until: number } | null = null;
+  function renderChoice(events: ReturnType<World['takeEvents']>): void {
+    for (const event of events) if (event.type === 'chose') chose = { options: event.options, picked: event.picked, until: performance.now() + 1300 };
+    const box = $('choice-box');
+    const choosing = world.choosing;
+    const showing = choosing ?? (chose && performance.now() < chose.until ? chose : null);
+    box.hidden = !showing;
+    if (!showing) return;
+    const who = world.creatureById(choosing?.who ?? world.focusId)?.name ?? 'It';
+    const picked = choosing ? -1 : (chose?.picked ?? -1);
+    const key = `${who}|${showing.options.join('|')}|${picked}`;
+    if (box.dataset.key !== key) {
+      box.dataset.key = key;
+      $('choice-title').textContent = choosing ? `${who} is choosing…` : `${who} chose ${showing.options[picked]}`;
+      $('choice-options').innerHTML = showing.options.map((o, i) => `<div class="choice-card${i === picked ? ' picked' : ''}${picked >= 0 && i !== picked ? ' passed' : ''}">${escapeHtml(o)}</div>`).join('');
+    }
+    // a glow that wanders between the options while it thinks
+    if (choosing) {
+      const cards = box.querySelectorAll<HTMLElement>('.choice-card');
+      const at = Math.floor(performance.now() / 380) % cards.length;
+      cards.forEach((card, i) => card.classList.toggle('thinking', i === at));
+    }
+  }
 
   // files. they all go through the same door, and each says what it is, so it doesn't matter which button or where you drop it
   const filesMenu = $('files-menu');
@@ -977,17 +1201,24 @@ async function boot(): Promise<void> {
   });
 
   // Play mode: the editor gets out of the way and this is a game. what you built goes back the way it was afterwards
-  let playingFrom: { room: RoomData; away: boolean } | null = null;
+  let playingFrom: { room: RoomData; away: boolean; stores: Record<string, number>; carried: Map<number, Pick<Creature, 'inventory' | 'boosts'>> } | null = null;
   function setPlaying(on: boolean): void {
     if (on === !!playingFrom) return;
     if (on) {
       editor.setView('room');
       editor.setTool('hand');
-      playingFrom = { room: world.roomForFile(), away: false };
+      // what everyone is carrying and what Storage holds go back the way they were afterwards, the same as the room
+      const carried = new Map(world.creatures.map((c) => [c.id, structuredClone({ inventory: c.inventory, boosts: c.boosts })]));
+      playingFrom = { room: world.roomForFile(), away: false, stores: { ...world.stores }, carried };
       if ($<HTMLInputElement>('play-empty').checked) world.setCreaturesAway(true);
       if (speed === 0) setSpeed(1);
     } else {
       const room = playingFrom?.room;
+      if (playingFrom) {
+        world.stores = playingFrom.stores;
+        for (const c of world.creatures) Object.assign(c, playingFrom.carried.get(c.id) ?? { inventory: {}, boosts: [] });
+        world.choosing = null;
+      }
       playingFrom = null;
       world.setCreaturesAway(false);
       world.keysDown.clear();
@@ -1087,7 +1318,7 @@ async function boot(): Promise<void> {
   }
 
   function welcome(data: CreatureData): void {
-    if (editor.inBody) editor.setView('room');
+    if (editor.inBody || editor.inArea) editor.setView('room');
     if (!world.adoptCreature(data)) return toast(`The room is full, at ${MOST_CREATURES} creatures. Send someone away first.`);
     syncFocus();
     save(world);
@@ -1335,7 +1566,7 @@ async function boot(): Promise<void> {
     if (playingFrom) return;
     if (e.key === '?') toggleHelp();
     else if (e.key === 'Escape' && helpBox.style.display === 'block') toggleHelp();
-    else if (e.code === 'KeyL' && !editor.inBody) setFollowing(!following);
+    else if (e.code === 'KeyL' && scene.view === 'room') setFollowing(!following);
     else if (e.code === 'KeyM') {
       prefs.minimap = !prefs.minimap;
       savePrefs();
@@ -1351,7 +1582,7 @@ async function boot(): Promise<void> {
     const at = list.findIndex((c) => c.id === world.focusId);
     const next = list[(at + by + list.length) % list.length];
     editor.focusOn(next.id);
-    if (!editor.inBody && !following) scene.centreOn(next.x, next.y);
+    if (scene.view === 'room' && !following) scene.centreOn(next.x, next.y);
   }
 
   // the list of keys
@@ -1380,7 +1611,7 @@ async function boot(): Promise<void> {
   const heard = (who: number): boolean => {
     if (who === world.focusId) return true;
     const c = world.creatureById(who);
-    if (!c || editor.inBody) return false;
+    if (!c || scene.view !== 'room') return false;
     const view = scene.viewRect();
     return c.x > view.x - 100 && c.x < view.x + view.width + 100 && c.y > view.y - 100 && c.y < view.y + view.height + 200;
   };
@@ -1578,7 +1809,7 @@ async function boot(): Promise<void> {
       label.textContent = c.dead ? `${c.name} (dead)` : c.hatching > 0 ? `${c.name} (egg)` : world.worstNeed(c) > 0.65 ? `${c.name} !` : c.name;
       b.append(dot, label);
       b.addEventListener('click', () => {
-        if (c.id === world.focusId && !editor.inBody) scene.centreOn(c.x, c.y);
+        if (c.id === world.focusId && scene.view === 'room') scene.centreOn(c.x, c.y);
         editor.focusOn(c.id);
       });
       rosterBox.appendChild(b);
@@ -2140,6 +2371,7 @@ async function boot(): Promise<void> {
       }
     }
     thoughts.take(events, world.tick, world.creatures.map((c) => c.id), new Map(world.creatures.map((c) => [c.id, c.name])));
+    renderChoice(events);
     notesThisFrame = 0;
     sounds.play(events, heard);
     for (const event of events) {
@@ -2149,7 +2381,7 @@ async function boot(): Promise<void> {
     if (playingFrom) {
       const target = world.cameraTarget();
       if (target) scene.follow(target.x, target.y, target.zoom, dt);
-    } else if (following && !editor.inBody) {
+    } else if (following && scene.view === 'room') {
       // looking somewhere else yourself means you've stopped following
       if (scene.pans !== pansWhenFollowing || minimap.moved) setFollowing(false);
       // a little low in the view, the way F shows it, so there's room above to see what it's going for
@@ -2168,7 +2400,8 @@ async function boot(): Promise<void> {
       renderRoster();
       family.refresh();
       renderTrial();
-      if (prefs.minimap && !editor.inBody && !playingFrom) minimap.draw();
+      renderGameHud();
+      if (prefs.minimap && scene.view === 'room' && !playingFrom) minimap.draw();
       $('paused-badge').classList.toggle('on', speed === 0 && !inMenu && !playingFrom);
       $<HTMLButtonElement>('undo').disabled = !editor.history.canUndo;
       $<HTMLButtonElement>('redo').disabled = !editor.history.canRedo;

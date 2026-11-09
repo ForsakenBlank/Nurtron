@@ -1,7 +1,7 @@
 // draws circuit parts and the wires between them. it only reads the world, the same as the rest of the drawing.
 import { BitmapText, Container, Graphics } from 'pixi.js';
 import type { Wire } from '../sim/circuit.ts';
-import { formatValue, portKind, portsOf, portWorld, toNumber, toTruth } from '../sim/parts.ts';
+import { formatValue, percent, portKind, portsOf, portWorld, toNumber, toTruth } from '../sim/parts.ts';
 import type { Part, PortKind } from '../sim/parts.ts';
 import type { Colour } from '../sim/senses.ts';
 import { needOf } from '../sim/world.ts';
@@ -35,11 +35,19 @@ export interface WireOverlay {
   shapePorts: ReadonlySet<number>; // shapes showing their Touched output right now
   inBody: boolean; // looking inside a creature rather than at the room
   owner: number; // which creature, if so
+  area: number | null; // whose build area, when looking at one
   playing: boolean; // in Play mode, the only circuitry left showing is what a player would see
 }
 
-// whether this is on the canvas being looked at
-const showing = (t: Thing | undefined, overlay: { inBody: boolean; owner: number }): boolean => !!t && !!t.inBody === overlay.inBody && (!overlay.inBody || t.owner === overlay.owner);
+// whether this is on the canvas being looked at. a thing is on its own build area's canvas too, in the middle
+export function showing(t: Thing | undefined, overlay: { inBody: boolean; owner: number; area: number | null }): boolean {
+  if (!t) return false;
+  if (overlay.area !== null) return t.area === overlay.area || t.id === overlay.area;
+  return !!t.inBody === overlay.inBody && t.area === undefined && (!overlay.inBody || t.owner === overlay.owner);
+}
+
+// a wire shows when both its ends are on this canvas
+const wireShowing = (world: World, wire: Wire, overlay: WireOverlay): boolean => showing(world.thing(wire.from), overlay) && showing(world.thing(wire.to), overlay);
 
 const curve = (a: { x: number; y: number; dx: number; dy: number }, b: { x: number; y: number; dx: number; dy: number }): { x: number; y: number }[] => {
   const handle = Math.max(24, Math.min(150, Math.hypot(b.x - a.x, b.y - a.y) * 0.45));
@@ -82,8 +90,11 @@ interface ChipVisual {
   title: BitmapText;
   readout: BitmapText;
   ports: BitmapText[];
+  portsKey: string; // which ports it had when it was made, since a Chance or Choice can change how many it has
   drawn: string;
 }
+
+const portsKeyOf = (t: Thing): string => portsOf(t).map((p) => `${p.dir}${p.name}:${p.label ?? ''}`).join('|');
 
 const text = (size: number, colour = 0xffffff): BitmapText => {
   const t = new BitmapText({ text: '', style: { fontFamily: 'Arial', fontSize: size, fill: 0xffffff } });
@@ -150,7 +161,11 @@ export class CircuitView {
 
   private visualFor(t: Thing): ChipVisual {
     let visual = this.visuals.get(t.id);
-    if (visual) return visual;
+    if (visual && (t.part?.kind !== 'chance' && t.part?.kind !== 'choice' || visual.portsKey === portsKeyOf(t))) return visual;
+    if (visual) {
+      visual.root.destroy({ children: true });
+      this.visuals.delete(t.id);
+    }
     const root = new Container();
     const g = new Graphics();
     const title = text(11);
@@ -158,12 +173,14 @@ export class CircuitView {
     root.addChild(g, title, readout);
     const ports = portsOf(t).map((p) => {
       const label = text(10, 0xb4bad0);
-      label.text = p.name;
+      label.text = p.label ? clip(p.label, 12) : p.name;
       root.addChild(label);
       return label;
     });
-    this.chips.addChild(root);
-    visual = { root, g, title, readout, ports, drawn: '' };
+    // the big boxes go behind everything, so the parts inside them stay on top
+    if (t.part?.kind === 'frame' || t.part?.kind === 'zone' || t.part?.kind === 'sensor') this.chips.addChildAt(root, 0);
+    else this.chips.addChild(root);
+    visual = { root, g, title, readout, ports, portsKey: portsKeyOf(t), drawn: '' };
     this.visuals.set(t.id, visual);
     return visual;
   }
@@ -181,6 +198,7 @@ export class CircuitView {
     v.readout.anchor.set(0.5, 0.5);
     const middle = -t.hh + 20 + (t.hh * 2 - 24) / 2;
     v.readout.position.set(part.kind === 'sensor' || part.kind === 'zone' ? 0 : -2, part.kind === 'sensor' ? 0 : part.kind === 'zone' ? -t.hh + 10 : middle);
+    if (part.kind === 'frame') v.title.style.fontSize = 13;
 
     portsOf(t).forEach((p, i) => {
       const label = v.ports[i];
@@ -265,6 +283,26 @@ export class CircuitView {
         const count = t.inner?.things.length ?? 0;
         return `${count} part${count === 1 ? '' : 's'}`;
       }
+      case 'combine':
+        return `${part.op} = ${clip(formatValue(circuit.peek(t.id, 'result')), 7)}`;
+      case 'chance':
+        return part.pick === 'each' ? 'each rolls' : 'pick one';
+      case 'storage':
+        return clip(formatValue(circuit.peek(t.id, 'value')), 10);
+      case 'items':
+        return `${clip(part.item ?? '', 8)}: ${formatValue(circuit.peek(t.id, 'count'))}`;
+      case 'mover':
+        return live.anim?.playing ? 'moving' : `${Math.max(0, (part.keys?.length ?? 1) - 1)} keys`;
+      case 'hurt':
+        return `${part.damage} · hp ${Math.round(toNumber(circuit.peek(t.id, 'hp')))}`;
+      case 'choice':
+        return live.chose ? clip(live.chose, 11) : `${part.options?.length ?? 0} options`;
+      case 'effect': {
+        const amount = part.amount ?? 0;
+        return `${part.stat} ${amount >= 0 ? '+' : ''}${percent(Math.round(amount * 1000) / 10)}`;
+      }
+      case 'ability':
+        return `${part.style} ${part.damage}`;
       default:
         return '';
     }
@@ -331,6 +369,12 @@ export class CircuitView {
       g.rect(-hw, -hh, hw * 2, 20).fill({ color: colour, alpha: 0.7 });
       dashedRect(g, hw, hh, 12);
       g.stroke({ width: 1.5, color: colour, alpha: state === 'true' ? 1 : 0.65 });
+    } else if (part.kind === 'frame') {
+      // a box to keep parts together, grabbed by its header
+      g.roundRect(-hw, -hh, hw * 2, hh * 2, 10).fill({ color: colour, alpha: 0.06 });
+      g.roundRect(-hw, -hh, hw * 2, 20, 10).fill({ color: colour, alpha: 0.45 });
+      g.rect(-hw, -hh + 10, hw * 2, 10).fill({ color: colour, alpha: 0.45 });
+      g.roundRect(-hw, -hh, hw * 2, hh * 2, 10).stroke({ width: 1.5, color: colour, alpha: 0.7 });
     } else if (part.kind === 'sensor') {
       const occupied = state === 'true';
       g.rect(-hw, -hh, hw * 2, hh * 2).fill({ color: colour, alpha: occupied ? 0.2 : 0.07 });
@@ -391,9 +435,9 @@ export class CircuitView {
 
     // laying out hundreds of lines is the slowest part of drawing, and mostly nothing has changed, so they're only
     // laid out again when something has moved or changed how a wire looks
-    let look = `${zoom.toFixed(3)}|${overlay.hoverWire}|${overlay.showPorts}|${overlay.inBody}|${overlay.owner}`;
+    let look = `${zoom.toFixed(3)}|${overlay.hoverWire}|${overlay.showPorts}|${overlay.inBody}|${overlay.owner}|${overlay.area}`;
     for (const wire of world.wires) {
-      if (!showing(world.thing(wire.from), overlay)) continue;
+      if (!wireShowing(world, wire, overlay)) continue;
       // reading a circuit takes a moment, so a few each frame is plenty for how bright a wire is
       if ((wire.id + this.frame) % 3 === 0 || !this.alive.has(wire.id)) this.alive.set(wire.id, toTruth(circuit.peek(wire.from, wire.out)));
       const from = world.thing(wire.from);
@@ -449,7 +493,7 @@ export class CircuitView {
     const g = this.wires.clear();
     this.paths.clear();
     for (const wire of world.wires) {
-      if (!showing(world.thing(wire.from), overlay)) continue;
+      if (!wireShowing(world, wire, overlay)) continue;
       const points = wirePoints(world, wire, poseOf);
       if (points.length === 0) continue;
       this.paths.set(wire.id, points);
@@ -489,7 +533,8 @@ export class CircuitView {
       if (!showing(other, overlay)) continue;
       if (wiring.kind === 'body') {
         if (other.id === wiring.thingId) continue;
-        g.circle(other.x, other.y, 9).stroke({ width: 2, color: colour, alpha: 0.8 });
+        const pose = poseOf(other);
+        g.circle(pose.x, pose.y, 9).stroke({ width: 2, color: colour, alpha: 0.8 });
         continue;
       }
       for (const p of portsOf(other)) {

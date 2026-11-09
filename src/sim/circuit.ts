@@ -2,10 +2,11 @@
 // that pulse arrives. everything else passes along instantly within one tick. someone can still build a true
 // endless loop, so it gets cut off and the wires involved flash red, rather than freezing the game.
 import { portKind, toNumber, toTruth } from './parts.ts';
-import type { CompareOp, LogicOp, MathOp, MotorMode, Value } from './parts.ts';
+import type { CombineOp, CompareOp, LogicOp, MathOp, MotorMode, Value } from './parts.ts';
 import { sample } from './rng.ts';
 import type { Rng } from './rng.ts';
 import { closestPoint, containsPoint } from './shapes.ts';
+import { storeKey } from './world.ts';
 import type { Creature, Effect, Thing, WorldEvent } from './world.ts';
 
 const MOST_ON_A_WIRE = 32; // no sensible circuit sends a wire this many pulses in one tick
@@ -35,6 +36,9 @@ export interface Live {
   was?: boolean; // compare, logic, keyboard, mouse, collision: what it gave last tick
   pending?: number[]; // delay: the ticks its pulses come out on
   kids?: number[]; // spawner: the copies it has made
+  seen?: string[]; // combine: which pulses have come in since it last said they all had
+  chose?: string; // choice: what was picked last
+  anim?: { time: number; dir: number; playing: boolean; bases: Record<number, { x: number; y: number; angle: number }> }; // mover
 }
 
 export interface MotorOrder {
@@ -49,7 +53,7 @@ export interface CircuitHost {
   tick: number;
   rng: Rng;
   things: Thing[];
-  creatures: Pick<Creature, 'id' | 'x' | 'y' | 'doing' | 'dead'>[];
+  creatures: Pick<Creature, 'id' | 'x' | 'y' | 'doing' | 'dead' | 'boosts'>[];
   creature: Pick<Creature, 'id'>; // the one the player is looking at
   events: WorldEvent[];
   dieFromWire(owner: number, caused: boolean): void;
@@ -59,6 +63,8 @@ export interface CircuitHost {
   keysTapped: Set<string>;
   pointer: { x: number; y: number; down: boolean };
   thing(id: number | null): Thing | undefined;
+  stores: Record<string, number>;
+  bagOf(p: Thing, who: number | null): { holds: Record<string, number>; creature: number | null } | null;
 }
 
 const key = (id: number, port: string): string => `${id}:${port}`;
@@ -195,7 +201,31 @@ export class Circuit {
     return (this.trouble.get(wireId) ?? -1) > this.host.tick;
   }
 
+  // the part with this id, including one sealed inside a tool
+  part(id: number): Thing | undefined {
+    return this.byId.get(id);
+  }
+
   // ---- things that happen from outside ----
+
+  // something happened to a thing that it has an output for, like being picked up or running out of health. right now
+  // means whatever it causes counts for what the creature is doing
+  fire(id: number, port: string, who: number | null, now = false): void {
+    if (who !== null) this.lastToucher = who;
+    if (!this.outOf.has(key(id, port))) return;
+    this.queue.push({ id, port, who });
+    if (now) this.drain();
+  }
+
+  // a creature got more of an item, which any Inventory counting that item for it says
+  gained(item: string, who: number): void {
+    const wanted = item.trim().toLowerCase();
+    for (const t of this.parts) {
+      if (t.part?.kind !== 'items' || (t.part.item ?? '').trim().toLowerCase() !== wanted) continue;
+      if (this.attached(t).length > 0) continue;
+      if ((t.owner ?? this.host.creature.id) === who || t.owner === undefined) this.queue.push({ id: t.id, port: 'gained', who });
+    }
+  }
 
   // when a creature does it, everything happens at once, so whatever it causes counts for the action it's finishing
   press(id: number, who: number | null = null): void {
@@ -364,6 +394,14 @@ export class Circuit {
         const due = t.live.pending.filter((at) => at <= this.host.tick).length;
         if (due > 0) t.live.pending = t.live.pending.filter((at) => at > this.host.tick);
         for (let i = 0; i < due; i++) this.queue.push({ id: t.id, port: 'done', who: null });
+      } else if (kind === 'ability' && !this.hasInput(t.id, 'fire')) {
+        // with nothing telling it when, it fires by itself every so often
+        if (t.owner !== undefined && this.host.creatures.find((c) => c.id === t.owner)?.dead) continue;
+        if (!toTruth(this.input(t, 'on'), true)) continue;
+        if (t.live.nextAt === null || t.live.nextAt === undefined || this.host.tick >= t.live.nextAt) {
+          t.live.nextAt = this.host.tick + Math.max(1, Math.round((t.part?.seconds ?? 1) * 30));
+          this.host.effect({ kind: 'fire', ability: t.id, who: null });
+        }
       } else if (kind === 'hit') {
         const shape = this.attached(t)[0];
         const touching = shape ? this.host.touching(shape, t.part?.tag ?? '') : [];
@@ -375,14 +413,28 @@ export class Circuit {
     }
   }
 
-  // whatever a part's body wire is holding on to
+  // whatever a part's body wire is holding on to. a part in a thing's build area that isn't attached to anything
+  // works on that thing, so a Mover in a door's build area moves the door
   private attached(t: Thing): Thing[] {
-    return (this.outOf.get(key(t.id, 'drives')) ?? []).map((w) => this.host.thing(w.to)).filter((x): x is Thing => !!x);
+    const wired = (this.outOf.get(key(t.id, 'drives')) ?? []).map((w) => this.host.thing(w.to)).filter((x): x is Thing => !!x);
+    if (wired.length > 0 || t.area === undefined) return wired;
+    const owner = this.host.thing(t.area);
+    return owner ? [owner] : [];
+  }
+
+  attachedTo(id: number): Thing[] {
+    const t = this.byId.get(id);
+    return t ? this.attached(t) : [];
   }
 
   // a part has something to say that didn't come in on a wire
-  pulseOut(id: number, port: string): void {
-    this.queue.push({ id, port, who: null });
+  pulseOut(id: number, port: string, who: number | null = null): void {
+    this.queue.push({ id, port, who });
+  }
+
+  // where a part is in the room. one in a build area is wherever its thing is
+  private spot(t: Thing): { x: number; y: number } {
+    return t.area !== undefined ? (this.host.thing(t.area) ?? t) : t;
   }
 
   // someone said a word. the same word in any case counts
@@ -395,7 +447,7 @@ export class Circuit {
     const found: number[] = [];
     if (tag === '' || tag === 'creature') for (const c of this.host.creatures) if (containsPoint(sensor, c.x, c.y - 30, CREATURE_RADIUS)) found.push(c.id);
     for (const t of this.host.things) {
-      if (t.part || t.heldBy || t.voice || t.hidden) continue;
+      if (t.part || t.heldBy || t.voice || t.hidden || t.bullet || t.area !== undefined) continue;
       if (tag !== '' && !t.tags?.includes(tag)) continue;
       const near = closestPoint(t, sensor.x, sensor.y);
       if (containsPoint(sensor, near.x, near.y)) found.push(t.id);
@@ -469,18 +521,76 @@ export class Circuit {
     } else if (kind === 'sound' && wire.in === 'play') {
       this.host.events.push({ type: 'sound', pitch: toNumber(this.input(t, 'pitch'), t.part.pitch ?? 440), seconds: t.part.seconds ?? 0.2 });
     } else if (kind === 'burst' && wire.in === 'go') {
-      const at = this.attached(t)[0] ?? t;
+      const at = this.attached(t)[0] ?? this.spot(t);
       this.host.events.push({ type: 'burst', x: at.x, y: at.y, colour: t.part.tint ?? 'yellow' });
     } else if (kind === 'say' && wire.in === 'say') {
       const owner = this.host.creatures.find((c) => c.id === t.owner);
-      this.host.effect({ kind: 'say', word: t.part.word ?? '', x: owner ? owner.x : t.x, y: owner ? owner.y - 90 : t.y, by: owner ? owner.id : null });
+      const at = this.spot(t);
+      this.host.effect({ kind: 'say', word: t.part.word ?? '', x: owner ? owner.x : at.x, y: owner ? owner.y - 90 : at.y, by: owner ? owner.id : null });
     } else if (kind === 'goal' && wire.in === 'reached') {
       this.host.effect({ kind: 'solved', who });
     } else if (kind === 'timer' && wire.in === 'reset') {
       this.arm(t);
     } else if (kind === 'motor' && wire.in === 'kick') {
       this.kicks.push(t.id);
+    } else if (kind === 'combine' && wire.in.startsWith('p')) {
+      this.queue.push({ id: t.id, port: 'any', who });
+      const seen = (t.live.seen ??= []);
+      if (!seen.includes(wire.in)) seen.push(wire.in);
+      const wired = ['p1', 'p2', 'p3', 'p4'].filter((p) => this.hasInput(t.id, p));
+      if (wired.every((p) => seen.includes(p))) {
+        t.live.seen = [];
+        this.queue.push({ id: t.id, port: 'all', who });
+      }
+    } else if (kind === 'chance' && wire.in === 'roll') {
+      for (const port of this.rollChance(t.part.chances ?? [], t.part.pick ?? 'one')) this.queue.push({ id: t.id, port, who });
+    } else if (kind === 'storage') {
+      const name = storeKey(t.name);
+      const was = this.host.stores[name] ?? t.part.start ?? 0;
+      const amount = toNumber(this.input(t, 'amount'), 1);
+      const now = wire.in === 'add' ? was + amount : wire.in === 'take' ? was - amount : wire.in === 'set' ? amount : was;
+      this.host.stores[name] = Math.max(-MOST_NUMBER, Math.min(MOST_NUMBER, now));
+      if (now !== was) for (const other of this.parts) if (other.part?.kind === 'storage' && storeKey(other.name) === name) this.queue.push({ id: other.id, port: 'changed', who });
+    } else if (kind === 'items' && (wire.in === 'give' || wire.in === 'take')) {
+      const amount = Math.round(toNumber(this.input(t, 'amount'), 1));
+      this.host.effect({ kind: 'items', part: t.id, who: who ?? this.lastToucher, change: wire.in === 'give' ? amount : -amount });
+    } else if (kind === 'mover') {
+      const anim = (t.live.anim ??= { time: 0, dir: 1, playing: false, bases: {} });
+      if (wire.in === 'stop') {
+        anim.playing = false;
+      } else {
+        // from the very start it takes where the thing is now as where it starts
+        if (anim.time <= 0 && wire.in === 'play') anim.bases = {};
+        anim.dir = wire.in === 'back' ? -1 : 1;
+        anim.playing = true;
+      }
+    } else if (kind === 'hurt' && (wire.in === 'hurt' || wire.in === 'heal')) {
+      const amount = toNumber(this.input(t, 'amount'), t.part.damage ?? 10);
+      for (const shape of this.attached(t)) this.host.effect({ kind: 'hurt', id: shape.id, amount: wire.in === 'hurt' ? amount : -amount, who, by: null });
+    } else if (kind === 'choice' && wire.in === 'ask') {
+      this.host.effect({ kind: 'choose', part: t.id, who });
+    } else if (kind === 'effect' && (wire.in === 'apply' || wire.in === 'clear')) {
+      this.host.effect({ kind: 'boost', part: t.id, who: who ?? this.lastToucher, clear: wire.in === 'clear' });
+    } else if (kind === 'ability' && wire.in === 'fire') {
+      if (toTruth(this.input(t, 'on'), true)) this.host.effect({ kind: 'fire', ability: t.id, who });
     }
+  }
+
+  // which outputs come up. with Pick one, the chances are slices of a hundred, and whatever's left over is none of them.
+  // if they add up to more than a hundred, they're shared out in the same proportions instead. with Each, every one
+  // gets its own roll, so any number of them can come up
+  private rollChance(chances: number[], pick: 'one' | 'each'): string[] {
+    if (pick === 'each') {
+      const up = chances.flatMap((c, i) => (this.host.rng.next() * 100 < c ? [`o${i + 1}`] : []));
+      return up.length ? up : ['none'];
+    }
+    const total = chances.reduce((sum, c) => sum + c, 0);
+    let roll = this.host.rng.next() * Math.max(100, total);
+    for (let i = 0; i < chances.length; i++) {
+      if (roll < chances[i]) return [`o${i + 1}`];
+      roll -= chances[i];
+    }
+    return ['none'];
   }
 
   // values don't wait for anyone to read them: a label still shows the latest, and a compare still notices turning true
@@ -618,6 +728,30 @@ export class Circuit {
         return port === 'x' ? this.host.pointer.x : port === 'y' ? this.host.pointer.y : this.host.pointer.down;
       case 'action':
         return this.host.creatures.find((c) => c.id === t.owner)?.doing?.action === part.action;
+      case 'combine': {
+        const values = ['a', 'b', 'c', 'd'].filter((p) => this.hasInput(id, p)).map((p) => this.input(t, p) ?? 0);
+        return combined((part.op ?? 'add') as CombineOp, values);
+      }
+      case 'storage':
+        return this.host.stores[storeKey(t.name)] ?? part.start ?? 0;
+      case 'items': {
+        const bag = this.host.bagOf(t, null);
+        const count = bag?.holds[part.item ?? 'Coin'] ?? 0;
+        return port === 'has' ? count > 0 : count;
+      }
+      case 'mover':
+        return !!live.anim?.playing;
+      case 'hurt': {
+        const shape = this.attached(t)[0];
+        return shape?.health ?? 0;
+      }
+      case 'choice':
+        return live.chose ?? '';
+      case 'effect': {
+        const c = this.host.creatures.find((one) => one.id === (t.owner ?? this.host.creature.id));
+        const stacks = (c?.boosts ?? []).filter((b) => b.from === id).length;
+        return port === 'active' ? stacks > 0 : stacks;
+      }
       default:
         return null;
     }
@@ -642,4 +776,17 @@ function comparison(op: CompareOp, a: Value, b: Value): boolean {
   const y = toNumber(b, Number.NaN);
   if (op === 'equal') return Number.isNaN(x) || Number.isNaN(y) ? String(a) === String(b) : x === y;
   return op === 'bigger' ? x > y : x < y;
+}
+
+function combined(op: CombineOp, values: Value[]): Value {
+  const numbers = values.map((v) => toNumber(v));
+  if (op === 'join') return values.map(String).join(' ').slice(0, 200);
+  if (op === 'all') return values.length > 0 && values.every((v) => toTruth(v));
+  if (op === 'any') return values.some((v) => toTruth(v));
+  if (op === 'count') return values.filter((v) => toTruth(v)).length;
+  if (numbers.length === 0) return 0;
+  if (op === 'average') return numbers.reduce((a, b) => a + b, 0) / numbers.length;
+  if (op === 'min') return Math.min(...numbers);
+  if (op === 'max') return Math.max(...numbers);
+  return Math.max(-MOST_NUMBER, Math.min(MOST_NUMBER, numbers.reduce((a, b) => a + b, 0)));
 }

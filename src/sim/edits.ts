@@ -110,7 +110,7 @@ function apply(world: World, state: Snapshot, other: Snapshot): void {
       world.remove(id);
     } else if (world.thing(id)) {
       // optional properties have to be cleared by name, or ones the old state didn't have would stay
-      world.update(id, { give: undefined, eaten: undefined, respawnSeconds: undefined, tags: undefined, texture: undefined, climbable: undefined, hidden: undefined, ...settings(spec) });
+      world.update(id, { give: undefined, eaten: undefined, respawnSeconds: undefined, tags: undefined, texture: undefined, climbable: undefined, hidden: undefined, ignored: undefined, label: undefined, decor: undefined, item: undefined, hp: undefined, enemy: undefined, holds: undefined, ...settings(spec) });
     } else {
       world.add(spec, id);
     }

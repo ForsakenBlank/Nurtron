@@ -58,6 +58,9 @@ export interface PhysicalThing {
   heldBy: boolean;
   dragged: boolean;
   inBody?: boolean; // inside a creature, so it isn't anywhere in the room
+  area?: number; // in a thing's build area, which isn't anywhere in the room either
+  bullet?: unknown; // flung by an Ability, which flies straight by itself
+  enemy?: { flies: boolean }; // gets about by itself, so it stays upright
 }
 
 export interface PhysicalCreature {
@@ -95,6 +98,8 @@ export class Physics {
   private walls: Collider[] = [];
   private drivenFixed = new Set<number>(); // fixed things a motor is moving, which go back to fixed when it stops
   private drivenNow = new Set<number>();
+  private animated = new Set<number>(); // things a Mover is carrying, which go back to how they were when it stops
+  private animatedNow = new Map<number, { x: number; y: number; angle: number }>();
 
   constructor(room: { width: number; height: number; floor: number }) {
     this.room = room;
@@ -160,7 +165,9 @@ export class Physics {
     desc ??= RAPIER.ColliderDesc.ball(Math.max(t.hw, t.hh));
     return desc
       .setDensity(0.01 * t.weight)
-      .setFriction(t.friction)
+      // an enemy sets its own speed every tick, so nothing should drag on it
+      .setFriction(t.enemy ? 0 : t.friction)
+      .setFrictionCombineRule(t.enemy ? RAPIER.CoefficientCombineRule.Min : RAPIER.CoefficientCombineRule.Average)
       .setRestitution(t.bounce)
       // something bouncy should bounce fully off anything, not average out with a dull floor
       .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Max)
@@ -172,20 +179,22 @@ export class Physics {
     const moved = t.dragged || t.heldBy;
     if (moved) return RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(t.x, t.y).setRotation(t.angle);
     if (t.fixed) return RAPIER.RigidBodyDesc.fixed().setTranslation(t.x, t.y).setRotation(t.angle);
-    return RAPIER.RigidBodyDesc.dynamic()
+    const desc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(t.x, t.y)
       .setRotation(t.angle)
       .setLinvel(t.vx, t.vy)
       .setAngvel(t.spin)
-      .setGravityScale(t.gravity ? 1 : 0)
+      .setGravityScale(t.gravity && !t.enemy?.flies ? 1 : 0)
       // a bit of drag so balls don't roll forever, and a lot for floating things so a nudge doesn't drift forever
-      .setLinearDamping(t.gravity ? 0.4 : 1.5)
+      .setLinearDamping(t.enemy ? 0 : t.gravity ? 0.4 : 1.5)
       .setAngularDamping(1)
       .setCcdEnabled(true);
+    // an enemy that rolled over would never get anywhere
+    return t.enemy ? desc.lockRotations() : desc;
   }
 
   add(t: PhysicalThing): void {
-    if (t.inBody) return;
+    if (t.inBody || t.area !== undefined || t.bullet) return;
     const body = this.world.createRigidBody(this.bodyDesc(t));
     const collider = this.world.createCollider(this.colliderDesc(t), body);
     this.entries.set(t.id, { body, collider });
@@ -197,6 +206,7 @@ export class Physics {
     this.world.removeRigidBody(entry.body);
     this.entries.delete(id);
     this.drivenFixed.delete(id);
+    this.animated.delete(id);
     this.wakeAll();
   }
 
@@ -268,6 +278,32 @@ export class Physics {
     }
   }
 
+  // a Mover takes it where it says, gliding there over the tick so anything on top is carried along
+  animate(t: PhysicalThing, x: number, y: number, angle: number): void {
+    const entry = this.entries.get(t.id);
+    if (!entry || t.dragged || t.heldBy) return;
+    if (!this.animated.has(t.id)) {
+      this.animated.add(t.id);
+      this.drivenFixed.delete(t.id);
+      entry.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+    }
+    this.animatedNow.set(t.id, { x, y, angle });
+  }
+
+  // a Mover that has stopped leaves its thing as it was before: staying put, or free to fall
+  private settleAnimated(things: PhysicalThing[]): void {
+    for (const id of this.animated) {
+      if (this.animatedNow.has(id)) continue;
+      this.animated.delete(id);
+      const t = things.find((one) => one.id === id);
+      const body = this.entries.get(id)?.body;
+      if (!t || !body) continue;
+      body.setBodyType(t.fixed ? RAPIER.RigidBodyType.Fixed : RAPIER.RigidBodyType.Dynamic, true);
+      body.setLinvel({ x: 0, y: 0 }, true);
+      body.setAngvel(0, true);
+    }
+  }
+
   private settleDriven(): void {
     for (const id of this.drivenFixed) {
       if (this.drivenNow.has(id)) continue;
@@ -305,8 +341,16 @@ export class Physics {
 
   step(things: PhysicalThing[], creatures: PhysicalCreature[], fieldAt: ((x: number, y: number) => { x: number; y: number } | null) | null = null): void {
     this.settleDriven();
+    this.settleAnimated(things);
     this.applyFields(things, fieldAt);
     const moves: { body: RigidBody; fromX: number; fromY: number; toX: number; toY: number; angle: number }[] = [];
+    for (const [id, to] of this.animatedNow) {
+      const body = this.entries.get(id)?.body;
+      if (!body) continue;
+      const from = body.translation();
+      moves.push({ body, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y, angle: to.angle });
+    }
+    this.animatedNow.clear();
     for (const t of things) {
       if (!t.dragged && !t.heldBy) continue;
       const entry = this.entries.get(t.id);

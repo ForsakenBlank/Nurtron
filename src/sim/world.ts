@@ -11,8 +11,10 @@ import { ancestors, babyName, cleanFamily, mixGenes, mixLooks, stageOf } from '.
 import type { Kin } from './family.ts';
 import { cleanLook, DEFAULT_LOOK } from './look.ts';
 import type { Look } from './look.ts';
-import { isSocket, mayHaveSockets, toNumber } from './parts.ts';
-import type { Part, Value, Wants } from './parts.ts';
+import { BULLET_SIZE } from './game.ts';
+import type { Bullet, Enemy } from './game.ts';
+import { isSocket, mayHaveSockets, partHeight, toNumber } from './parts.ts';
+import type { EffectStat, Part, Value, Wants } from './parts.ts';
 import { JUMP_RISE, LEAP_SPEED, planRoute } from './navigate.ts';
 import type { Ledge, RouteStep } from './navigate.ts';
 import { BODY, GRAVITY, Physics } from './physics.ts';
@@ -27,6 +29,11 @@ export { initPhysics } from './physics.ts';
 
 export const TICKS_PER_SECOND = 30;
 export const ROOM = { width: 2000, height: 1000, floor: 940 };
+// the inside of a creature, where its body's wires go. it's roomy, so a body can grow as big as you like
+export const BODY_ROOM = { width: 8000, height: 5000, floor: 4940 };
+// a thing's build area, where the parts that make it work go, with the thing itself standing in the middle
+export const AREA = { width: 6000, height: 4000, floor: 3940 };
+export const AREA_MIDDLE = { x: AREA.width / 2, y: AREA.height / 2 };
 const CENTRE = ROOM.width / 2;
 // a world can be any size in here. ROOM stays the size of the inside of a creature, and what brains get tested in.
 export const SIZE_RANGE = { minWidth: 1000, maxWidth: 40000, minHeight: 600, maxHeight: 10000 };
@@ -59,6 +66,10 @@ const EARSHOT = 2000;
 const MOST_CHANNELS_WITH_WORDS = 48;
 const ROUTE_EVERY = 12; // ticks between working out the way again
 const WALL_MARGIN = 120; // this close to the edge of the room, wandering turns back
+const PICK_UP = 40; // how close an item has to be to its middle for a creature to pick it up without trying
+const MAGNET_REACH = 160; // and how much further each bit of Magnet pulls items in from
+const ATTACK = 10; // what a creature's touch or push does to something with health, before any Attack effect
+const CHOICE_LEARN_TICKS = 12 * TICKS_PER_SECOND; // how long after a choice it judges how well it went
 
 // a drive only teaches when something changed it by more than this during an action. the slow tick down of
 // hunger is left out completely: it says nothing about what the creature just did, and counting it
@@ -96,6 +107,15 @@ export interface ThingSpec {
   expires?: number; // the tick it goes away by itself
   spawned?: number; // made by this spawner, so it's not part of what gets saved to a file
   texture?: string; // the id of a picture drawn on it, which is only for the player: the creature goes by its colour
+  ignored?: boolean; // creatures leave it alone: they can't see it, go to it or press it
+  label?: string; // words shown over it, which are only for the player
+  decor?: string; // which decoration it's drawn as. a creature still only sees its shape and colour
+  item?: boolean; // a creature that touches it picks it up, into what it's carrying, under its name
+  hp?: number; // its health when full. it can be hurt, and goes when this runs out
+  enemy?: Enemy; // gets about by itself, going for creatures
+  holds?: Record<string, number>; // a chest: what's inside, which a creature takes when it opens it
+  area?: number; // which thing's build area it's in, rather than out in the room
+  bullet?: Bullet; // flung by an Ability
 }
 
 export interface Thing extends ThingSpec {
@@ -116,6 +136,9 @@ export interface Thing extends ThingSpec {
   home: number; // the x it comes back near after being eaten
   live?: Live; // what a circuit part is up to right now
   inner?: { things: Thing[]; wires: Wire[] }; // a tool: the real parts sealed inside it, running like any others
+  health?: number; // how much it has left, when it has health
+  dying?: boolean; // its health ran out this tick, and it's about to go
+  ai?: { homeX: number; homeY: number; dir: number; stuck: number; lastX: number; turnAt: number; hitAt: Record<number, number> }; // an enemy getting about
 }
 
 // a set of things and the wires between them, for room files, copy and paste. wires go by position in the list,
@@ -140,7 +163,29 @@ export type Effect =
   | { kind: 'destroy'; id: number }
   | { kind: 'teleport'; id: number; x: number; y: number }
   | { kind: 'say'; word: string; x: number; y: number; by: number | null }
-  | { kind: 'solved'; who: number | null };
+  | { kind: 'solved'; who: number | null }
+  | { kind: 'kill'; id: number; who: number | null; by: number | null }
+  | { kind: 'hurt'; id: number; amount: number; who: number | null; by: number | null }
+  | { kind: 'fire'; ability: number; who: number | null }
+  | { kind: 'choose'; part: number; who: number | null }
+  | { kind: 'boost'; part: number; who: number | null; clear: boolean }
+  | { kind: 'items'; part: number; who: number | null; change: number };
+
+// a creature stopped to pick between some options, with everything else waiting for it
+export interface Choosing {
+  part: number;
+  who: number;
+  options: string[];
+  left: number; // ticks of thinking still to go
+}
+
+// what an Effect is doing to a creature, which can stack up
+export interface Boost {
+  stat: EffectStat;
+  amount: number;
+  until: number | null; // the tick it wears off, or never
+  from: number; // the Effect part it came from
+}
 
 export interface TrialState {
   name: string;
@@ -242,6 +287,10 @@ export interface Creature {
   stunned: number;
   shoved?: number; // ticks left being knocked along by someone else's push
   holding: number | null;
+  inventory: Record<string, number>; // items it has picked up, by name
+  boosts: Boost[]; // Effects on it right now
+  likes: Record<string, number>; // how well each thing it has picked from a Choice has turned out
+  judging?: { option: string; need: number; at: number }[]; // choices it hasn't yet seen the end of
   brain: Brain;
 }
 
@@ -267,7 +316,14 @@ export type WorldEvent =
   | { type: 'replayed'; who: number; moments: number }
   | { type: 'noticed'; who: number; name: string; after: Action; cause: string }
   | { type: 'planned'; who: number; steps: PlanStep[] }
-  | { type: 'cuddled'; who: number; other: number };
+  | { type: 'cuddled'; who: number; other: number }
+  | { type: 'picked'; who: number; name: string; x: number; y: number }
+  | { type: 'looted'; who: number; holds: Record<string, number>; x: number; y: number }
+  | { type: 'hurt'; x: number; y: number; amount: number; thingId: number | null; who: number | null }
+  | { type: 'killed'; x: number; y: number; colour: Colour; name: string }
+  | { type: 'fired'; x: number; y: number; style: string; range: number; colour: Colour }
+  | { type: 'choosing'; who: number; options: string[] }
+  | { type: 'chose'; who: number; options: string[]; picked: number };
 
 export interface WorldOptions {
   seed: number;
@@ -296,7 +352,7 @@ export const ROCK: ThingSpec = { name: 'Rock', form: 'box', colour: 'grey', hw: 
 
 // just the parts of a thing that describe it, without what it's doing right now
 export function specOf(t: Thing): ThingSpec {
-  const { id: _id, vx: _vx, vy: _vy, spin: _spin, heldBy: _heldBy, dragged: _dragged, home: _home, live, inner, ...spec } = t;
+  const { id: _id, vx: _vx, vy: _vy, spin: _spin, heldBy: _heldBy, dragged: _dragged, home: _home, live, inner, health: _health, dying: _dying, ai: _ai, ...spec } = t;
   // what a label holds right now is part of it, so a copy or a saved room keeps its count
   if (spec.part?.kind === 'label' && live?.value !== undefined) spec.part = { ...spec.part, value: live.value };
   if (inner && spec.part?.tool) {
@@ -316,6 +372,8 @@ export class World {
   keysTapped = new Set<string>(); // pressed since the last tick, so a quick tap between ticks still counts
   pointer = { x: 0, y: 0, down: false };
   trial: TrialState | null = null;
+  stores: Record<string, number> = {}; // what every Storage part holds, by name, shared by the whole world
+  choosing: Choosing | null = null; // a creature is picking, and everything else waits
   private zones: Thing[] = [];
   private routes = new Map<number, { at: number; step: RouteStep | null }>();
   private visible = new Set<number>(); // what could be seen last tick, so something new coming into view gets noticed
@@ -420,6 +478,9 @@ export class World {
       pause: TICKS_PER_SECOND,
       stunned: 0,
       holding: null,
+      inventory: {},
+      boosts: [],
+      likes: {},
       brain: new Brain([], options.genes ?? {}),
     };
   }
@@ -606,6 +667,8 @@ export class World {
       home: spec.x,
     };
     if (spec.part) thing.live = spec.part.kind === 'label' ? { value: spec.part.value ?? 0 } : {};
+    if (spec.hp !== undefined) thing.health = spec.hp;
+    if (spec.part?.kind === 'storage') this.stores[storeKey(spec.name)] ??= spec.part.start ?? 0;
     if (id !== undefined) this.nextId = Math.max(this.nextId, id + 1);
     return thing;
   }
@@ -648,6 +711,7 @@ export class World {
       if (c.doing?.targetId === id) this.endAction(true, c);
     }
     const part = this.thing(id)?.part;
+    if (this.choosing?.part === id) this.choosing = null;
     this.things = this.things.filter((t) => t.id !== id);
     this.index.delete(id);
     this.previous.delete(id);
@@ -689,11 +753,17 @@ export class World {
     }
     if (patch.x !== undefined) t.home = patch.x;
     if (patch.fixed) t.vx = t.vy = t.spin = 0;
+    if ('hp' in patch) t.health = t.hp;
+    if ('enemy' in patch) delete t.ai;
+    if (patch.name !== undefined && t.part?.kind === 'storage') this.stores[storeKey(t.name)] ??= t.part.start ?? 0;
     this.physics.rebuild(t);
   }
 
   private updatePart(t: Thing, was: Part, patch: Part): void {
     t.part = { ...was, ...patch };
+    // a Chance or a Choice is as tall as it needs to be for however many outputs it has now
+    if (t.part.kind === 'chance' || t.part.kind === 'choice') t.hh = partHeight(t.part);
+    if (t.part.kind === 'mover' && t.live) delete t.live.anim;
     if (!t.live) return;
     if (patch.value !== undefined) t.live.value = patch.value;
     // a new setting starts it again, rather than finishing a wait that no longer applies
@@ -794,6 +864,13 @@ export class World {
       if (from !== undefined && to !== undefined) wires.push({ from, out: w.out, to, in: w.in });
     }
     const things = picked.map(specOf);
+    // a build area goes with its thing by position, the same as wires. one whose thing was left behind comes out into the room
+    for (const spec of things) {
+      if (spec.area === undefined) continue;
+      const at = position.get(spec.area);
+      if (at === undefined) delete spec.area;
+      else spec.area = at;
+    }
     return { things, wires, textures: this.texturesFor(things) };
   }
 
@@ -804,8 +881,14 @@ export class World {
     const waiting = this.respawns.filter((r) => r.id !== undefined);
     for (const r of this.respawns) {
       if (r.id !== undefined) position.set(r.id, room.things.length);
-      room.things.push(r.spec);
+      room.things.push({ ...r.spec, area: undefined });
     }
+    // a build area whose thing is waiting to come back still belongs to it
+    const waitingAt = new Map(this.respawns.filter((r) => r.id !== undefined).map((r) => [r.id as number, position.get(r.id as number) as number]));
+    const kept = this.things.filter(belongsInFile);
+    kept.forEach((t, i) => {
+      if (t.area !== undefined && room.things[i].area === undefined && waitingAt.has(t.area)) room.things[i].area = waitingAt.get(t.area);
+    });
     const seen = new Set<number>();
     for (const r of waiting) {
       for (const w of r.wires ?? []) {
@@ -865,6 +948,18 @@ export class World {
         this.say(effect.word, effect.x, effect.y, effect.by);
       } else if (effect.kind === 'solved') {
         this.solveTrial(effect.who);
+      } else if (effect.kind === 'kill') {
+        this.kill(effect.id, effect.who, effect.by);
+      } else if (effect.kind === 'hurt') {
+        this.hurtThing(effect.id, effect.amount, effect.who, effect.by);
+      } else if (effect.kind === 'fire') {
+        this.fire(effect.ability, effect.who);
+      } else if (effect.kind === 'choose') {
+        this.startChoosing(effect.part, effect.who);
+      } else if (effect.kind === 'boost') {
+        this.boostFrom(effect.part, effect.who, effect.clear);
+      } else if (effect.kind === 'items') {
+        this.changeItems(effect.part, effect.who, effect.change);
       }
     }
   }
@@ -883,10 +978,472 @@ export class World {
     const free = shape.hidden ? { fixed: false, gravity: true } : {};
     const copy = this.add({ ...spec, ...free, x: x ?? shape.x, y: y ?? shape.y, hidden: false, spawned: spawner });
     // a copy is wired up the way its original is, so a copy of a fruit still feeds
-    for (const w of this.wires.filter((wire) => wire.from === template && wire.out === 'touched')) this.connect(copy.id, w.out, w.to, w.in);
+    for (const w of this.wires.filter((wire) => wire.from === template && wire.in !== 'body')) this.connect(copy.id, w.out, w.to, w.in);
     kids.push(copy.id);
     from.live.kids = kids;
     this.circuit.pulseOut(spawner, 'made');
+  }
+
+  // ---- the game: items, chests, health, enemies, Abilities, Effects, Choices and Movers ----
+
+  // what an Effect adds up to on this creature right now, for one stat
+  boost(c: Creature, stat: EffectStat): number {
+    let sum = 0;
+    for (const b of c.boosts ?? []) if (b.stat === stat) sum += b.amount;
+    return sum;
+  }
+
+  private speedOf(c: Creature): number {
+    return c.boosts?.length ? Math.max(0.1, 1 + this.boost(c, 'speed')) : 1;
+  }
+
+  // how much it needs everything it cares about, all added up, for judging how a choice turned out
+  private needTotal(c: Creature): number {
+    let sum = 0;
+    for (const d of c.drives) if (d.kind === 'drive') sum += needOf(d);
+    return sum;
+  }
+
+  // Effects wearing off, items coming to it, and seeing how its last choices turned out
+  private stepGame(c: Creature, items: Thing[]): void {
+    if (c.boosts?.length) c.boosts = c.boosts.filter((b) => b.until === null || b.until > this.tick);
+    if (c.judging?.length) this.judgeChoices(c);
+    if (items.length === 0 || c.dead || c.hatching > 0 || c.dragged) return;
+    const bodyY = c.y - BODY.centreAboveFeet;
+    const pull = PICK_UP + Math.max(0, this.boost(c, 'magnet')) * MAGNET_REACH;
+    for (const t of items) {
+      if (t.dying || t.heldBy || t.dragged || !this.thing(t.id)) continue;
+      const near = closestPoint(t, c.x, bodyY);
+      const distance = Math.hypot(near.x - c.x, near.y - bodyY);
+      if (distance <= PICK_UP) this.pickUp(c, t);
+      else if (distance <= pull && !t.fixed) {
+        // a Magnet draws it in
+        const d = Math.hypot(c.x - t.x, bodyY - t.y) || 1;
+        this.physics.setVelocity(t.id, ((c.x - t.x) / d) * 420, ((bodyY - t.y) / d) * 420);
+      }
+    }
+  }
+
+  // into what it's carrying, under the item's name
+  private pickUp(c: Creature, t: Thing): void {
+    if (t.dying || !this.thing(t.id)) return;
+    t.dying = true;
+    const before = this.needs(c);
+    c.inventory ??= {};
+    c.inventory[t.name] = (c.inventory[t.name] ?? 0) + 1;
+    if (t.give) this.giveTo(t.give.drive, t.give.amount, c);
+    this.circuit.fire(t.id, 'picked', c.id);
+    this.circuit.gained(t.name, c.id);
+    this.circuit.touch(t.id, c.id);
+    this.circuit.takeCaused(c.id);
+    this.readDrives(c, true);
+    let ate = false;
+    for (const drive of c.drives) if (drive.kind === 'drive' && needOf(drive) < before[drive.channel]) ate = true;
+    this.events.push({ type: 'touched', who: c.id, thingId: t.id, name: t.name, ate, fatal: c.dead });
+    this.events.push({ type: 'picked', who: c.id, name: t.name, x: t.x, y: t.y });
+    if (c.doing?.targetId === t.id) c.doing.targetId = null;
+    this.goAway(t);
+  }
+
+  // a chest: it takes everything inside
+  private open(c: Creature, t: Thing): void {
+    const holds = t.holds ?? {};
+    c.inventory ??= {};
+    for (const [name, n] of Object.entries(holds)) {
+      c.inventory[name] = (c.inventory[name] ?? 0) + n;
+      this.circuit.gained(name, c.id);
+    }
+    if (Object.keys(holds).length) this.events.push({ type: 'looted', who: c.id, holds: { ...holds }, x: t.x, y: t.y - t.hh });
+    t.holds = {};
+    this.circuit.fire(t.id, 'opened', c.id);
+  }
+
+  // whose things an Inventory part counts: what it's attached to, the creature it's inside, or else whoever
+  bagOf(p: Thing, who: number | null): { holds: Record<string, number>; creature: number | null } | null {
+    const attached = this.circuit.attachedTo(p.id)[0];
+    if (attached) return { holds: (attached.holds ??= {}), creature: null };
+    const c = p.owner !== undefined ? this.creatureById(p.owner) : (this.creatureById(who ?? -1) ?? this.creature);
+    if (!c) return null;
+    return { holds: (c.inventory ??= {}), creature: c.id };
+  }
+
+  private changeItems(id: number, who: number | null, change: number): void {
+    const p = this.circuit.part(id);
+    if (p?.part?.kind !== 'items' || change === 0) return;
+    const name = p.part.item ?? 'Coin';
+    const bag = this.bagOf(p, who);
+    if (!bag) return;
+    const have = bag.holds[name] ?? 0;
+    if (have + change < 0) {
+      this.circuit.pulseOut(id, 'lacked');
+      return;
+    }
+    if (have + change === 0) delete bag.holds[name];
+    else bag.holds[name] = have + change;
+    if (change > 0) {
+      if (bag.creature !== null) this.circuit.gained(name, bag.creature);
+      else this.circuit.pulseOut(id, 'gained');
+    }
+  }
+
+  // anything with health that this counts as a target: enemies, or a tag, or with no tag, anything with health
+  private hurtable(t: Thing, tag: string): boolean {
+    if (t.health === undefined || t.dying || t.part || t.inBody || t.area !== undefined || t.bullet || t.hidden) return false;
+    if (tag === '') return true;
+    if (tag === 'enemy') return !!t.enemy || !!t.tags?.includes('enemy');
+    return !!t.tags?.includes(tag);
+  }
+
+  // takes health away, or gives it back if the amount is below zero. at nothing it goes, a moment later
+  hurtThing(id: number, amount: number, who: number | null, by: number | null): void {
+    const t = this.thing(id);
+    if (!t || t.health === undefined || t.dying || amount === 0) return;
+    t.health = Math.min(t.hp ?? Infinity, t.health - amount);
+    this.events.push({ type: 'hurt', x: t.x, y: t.y - boundingRadius(t), amount, thingId: t.id, who });
+    if (by !== null && amount > 0) this.circuit.pulseOut(by, 'hit');
+    if (t.health <= 0) {
+      t.dying = true;
+      this.effect({ kind: 'kill', id, who, by });
+    }
+  }
+
+  private kill(id: number, who: number | null, by: number | null): void {
+    const t = this.thing(id);
+    if (!t) return;
+    // it has to say so before it goes, or its wires go with it
+    this.circuit.fire(t.id, 'died', who, true);
+    if (by !== null) this.circuit.pulseOut(by, 'killed');
+    this.events.push({ type: 'killed', x: t.x, y: t.y, colour: t.colour, name: t.name });
+    if (who !== null) this.circuit.takeCaused(who);
+    this.goAway(t);
+  }
+
+  // where an Ability fires from: the creature it's inside, what it's attached to, the thing whose build area it's in,
+  // or else whoever set it off
+  private originOf(a: Thing, who: number | null): { x: number; y: number; from: number | null; creature: Creature | null } | null {
+    const live = (c: Creature | undefined): c is Creature => !!c && !c.dead && c.hatching === 0 && !c.hiddenAway;
+    if (a.owner !== undefined) {
+      const c = this.creatureById(a.owner);
+      return live(c) ? { x: c.x, y: c.y - BODY.centreAboveFeet, from: null, creature: c } : null;
+    }
+    const shape = this.circuit.attachedTo(a.id)[0];
+    if (shape) return { x: shape.x, y: shape.y, from: shape.id, creature: null };
+    const c = this.creatureById(who ?? -1) ?? this.creature;
+    return live(c) ? { x: c.x, y: c.y - BODY.centreAboveFeet, from: null, creature: c } : null;
+  }
+
+  private fire(id: number, who: number | null): void {
+    const a = this.circuit.part(id);
+    const part = a?.part;
+    if (!a || part?.kind !== 'ability') return;
+    const origin = this.originOf(a, who);
+    if (!origin) return;
+    const strength = origin.creature ? Math.max(0, 1 + this.boost(origin.creature, 'attack')) : 1;
+    const damage = toNumber(this.circuit.inputValue(id, 'damage'), part.damage ?? 10) * strength;
+    const range = part.range ?? 600;
+    const speed = part.speed ?? 500;
+    const count = part.count ?? 1;
+    const style = part.style ?? 'shoot';
+    const colour = part.tint ?? 'yellow';
+    const targets = this.things
+      .filter((t) => t.id !== origin.from && this.hurtable(t, part.tag ?? 'enemy'))
+      .map((t) => {
+        const near = closestPoint(t, origin.x, origin.y);
+        return { t, distance: Math.hypot(near.x - origin.x, near.y - origin.y) };
+      })
+      .filter((one) => one.distance <= range)
+      .sort((a, b) => a.distance - b.distance);
+    const by = origin.creature?.id ?? null;
+    if (style === 'aura') {
+      if (targets.length === 0) return;
+      for (const one of targets) this.hurtThing(one.t.id, damage, by, id);
+    } else if (style === 'shoot') {
+      if (targets.length === 0) return;
+      for (let i = 0; i < count; i++) {
+        const aim = targets[i % targets.length].t;
+        const spread = count > targets.length ? (i - (count - 1) / 2) * 0.12 : 0;
+        const angle = Math.atan2(aim.y - origin.y, aim.x - origin.x) + spread;
+        this.fling(id, origin, angle, speed, range, damage, colour, part.tag ?? 'enemy');
+      }
+    } else {
+      const turn = (this.tick % 360) * 0.05;
+      for (let i = 0; i < count; i++) this.fling(id, origin, turn + (i / count) * Math.PI * 2, speed, range, damage, colour, part.tag ?? 'enemy');
+    }
+    this.circuit.pulseOut(id, 'fired');
+    this.events.push({ type: 'fired', x: origin.x, y: origin.y, style, range, colour });
+  }
+
+  private fling(ability: number, origin: { x: number; y: number; from: number | null }, angle: number, speed: number, range: number, damage: number, colour: Colour, tag: string): void {
+    const bullet: Bullet = { vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, damage, ability, tag, from: origin.from, until: this.tick + Math.ceil((range / speed) * TICKS_PER_SECOND) };
+    this.add({ name: 'Spark', form: 'circle', colour, hw: BULLET_SIZE, hh: BULLET_SIZE, x: origin.x, y: origin.y, fixed: true, gravity: false, solid: false, spawned: ability, bullet });
+  }
+
+  // sparks fly straight, and hurt the first thing they hit that they're after
+  private stepBullets(): void {
+    const flying = this.things.filter((t) => t.bullet);
+    if (flying.length === 0) return;
+    for (const b of flying) {
+      const bullet = b.bullet as Bullet;
+      b.x += bullet.vx * DT;
+      b.y += bullet.vy * DT;
+      if (this.tick >= bullet.until || b.x < -60 || b.x > this.size.width + 60 || b.y < -60 || b.y > this.size.floor) {
+        this.remove(b.id);
+        continue;
+      }
+      const hit = this.things.find((t) => t.id !== bullet.from && this.hurtable(t, bullet.tag) && containsPoint(t, b.x, b.y, BULLET_SIZE));
+      if (hit) {
+        this.hurtThing(hit.id, bullet.damage, null, bullet.ability);
+        this.remove(b.id);
+      }
+    }
+  }
+
+  // enemies find what they're after and go for it, hop over what's in the way, and hurt creatures they touch
+  private stepEnemies(): void {
+    for (const t of this.things) {
+      const e = t.enemy;
+      if (!e || t.dragged || t.heldBy || t.dying || t.hidden || t.inBody || t.area !== undefined) continue;
+      const ai = (t.ai ??= { homeX: t.x, homeY: t.y, dir: 1, stuck: 0, lastX: t.x, turnAt: 0, hitAt: {} });
+      this.enemyBites(t, e, ai);
+      if (t.fixed) continue;
+      const target = this.enemyTarget(t, e);
+      let vx = 0;
+      let vy = 0;
+      const towards = (x: number, y: number, away: number): void => {
+        const dx = x - t.x;
+        const dy = y - t.y;
+        const d = Math.hypot(dx, dy) || 1;
+        if (away > 0 && d <= e.keep + boundingRadius(t)) return;
+        if (e.flies) {
+          vx = (dx / d) * e.speed * away;
+          vy = (dy / d) * e.speed * away;
+        } else if (Math.abs(dx) > 4) {
+          vx = Math.sign(dx) * e.speed * away;
+        }
+      };
+      const stroll = (): void => {
+        if (t.x > ai.homeX + e.width) ai.dir = -1;
+        else if (t.x < ai.homeX - e.width) ai.dir = 1;
+        vx = ai.dir * e.speed * 0.6;
+      };
+      if (e.mode === 'flee') {
+        if (target) towards(target.x, target.y, -1);
+      } else if (e.mode === 'wander') {
+        if (this.tick >= ai.turnAt) {
+          ai.dir = this.rng.next() < 0.5 ? -1 : 1;
+          ai.turnAt = this.tick + Math.round(this.rng.range(2, 5) * TICKS_PER_SECOND);
+        }
+        stroll();
+        if (e.flies) vy = Math.sin(this.tick / 25 + t.id) * e.speed * 0.3;
+      } else if (target && (e.mode !== 'guard' || Math.abs(target.x - ai.homeX) <= e.width + e.sight / 2)) {
+        towards(target.x, target.y, 1);
+      } else if (e.mode === 'patrol') {
+        stroll();
+      } else if (e.mode === 'guard' && Math.hypot(ai.homeX - t.x, ai.homeY - t.y) > 20) {
+        towards(ai.homeX, e.flies ? ai.homeY : t.y, 1);
+      }
+      // at an edge it stops rather than falling off, if it's set to
+      if (!e.flies && e.ledges && vx !== 0 && !this.groundAhead(t, Math.sign(vx))) {
+        vx = 0;
+        ai.dir *= -1;
+      }
+      // hopping over what's in the way, or up to what it's after
+      const wantsToGo = vx !== 0;
+      ai.stuck = wantsToGo && Math.abs(t.x - ai.lastX) < 0.6 ? ai.stuck + 1 : 0;
+      ai.lastX = t.x;
+      let jump = false;
+      const resting = Math.abs(t.vy) < 15;
+      if (!e.flies && e.jump > 0 && resting && this.tick - (ai.hitAt[-1] ?? -1e9) > 20) {
+        const above = target && target.y < t.y - 70 && Math.abs(target.x - t.x) < 260;
+        if (ai.stuck > 6 || (above && e.mode !== 'flee')) {
+          jump = true;
+          ai.hitAt[-1] = this.tick;
+          ai.stuck = 0;
+        }
+      }
+      this.physics.setVelocity(t.id, vx, e.flies ? vy : jump ? -e.jump : t.vy);
+    }
+  }
+
+  private groundAhead(t: Thing, dir: number): boolean {
+    const x = t.x + dir * (t.hw + 10);
+    const y = t.y + t.hh + 14;
+    if (y >= this.size.floor) return true;
+    return this.things.some((o) => o.id !== t.id && o.solid && !o.part && !o.inBody && o.area === undefined && !o.bullet && containsPoint(o, x, y, 2));
+  }
+
+  // the nearest of what it's after that it can see: creatures, or things with its tag
+  private enemyTarget(t: Thing, e: Enemy): { x: number; y: number } | null {
+    let best: { x: number; y: number } | null = null;
+    let bestDistance = e.sight;
+    if (e.target === 'creature') {
+      for (const c of this.creatures) {
+        if (c.dead || c.hatching > 0 || c.hiddenAway) continue;
+        const d = Math.hypot(c.x - t.x, c.y - BODY.centreAboveFeet - t.y);
+        if (d <= bestDistance) {
+          best = { x: c.x, y: c.y - BODY.centreAboveFeet };
+          bestDistance = d;
+        }
+      }
+      return best;
+    }
+    for (const o of this.things) {
+      if (o.id === t.id || o.part || o.inBody || o.area !== undefined || !o.tags?.includes(e.target)) continue;
+      const d = Math.hypot(o.x - t.x, o.y - t.y);
+      if (d <= bestDistance) {
+        best = { x: o.x, y: o.y };
+        bestDistance = d;
+      }
+    }
+    return best;
+  }
+
+  // an enemy touching a creature takes some of its Health, knocks it back a little, and says so on its Hit output
+  private enemyBites(t: Thing, e: Enemy, ai: NonNullable<Thing['ai']>): void {
+    for (const c of this.creatures) {
+      if (c.dead || c.hatching > 0 || c.hiddenAway || c.dragged) continue;
+      const bodyY = c.y - BODY.centreAboveFeet;
+      const near = closestPoint(t, c.x, bodyY);
+      if (Math.hypot(near.x - c.x, near.y - bodyY) > BODY.radius + 4) continue;
+      if (this.tick - (ai.hitAt[c.id] ?? -1e9) < e.every * TICKS_PER_SECOND) continue;
+      ai.hitAt[c.id] = this.tick;
+      const amount = e.damage / Math.max(0.1, 1 + this.boost(c, 'defence'));
+      if (amount !== 0) {
+        this.giveTo('Health', -amount, c);
+        this.events.push({ type: 'hurt', x: c.x, y: c.y - 70, amount, thingId: null, who: c.id });
+        this.physics.knockCreature(c.id, (Math.sign(c.x - t.x) || 1) * 240, -160);
+        c.shoved = Math.round(0.3 * TICKS_PER_SECOND);
+      }
+      this.circuit.fire(t.id, 'hit', c.id);
+    }
+  }
+
+  // Movers carry what they're attached to through their keyframes. nothing can stop it, like a lift, and anything
+  // standing on it gets carried along
+  private stepMovers(): void {
+    for (const m of this.circuit.allParts) {
+      const anim = m.live?.anim;
+      if (m.part?.kind !== 'mover' || !anim?.playing) continue;
+      const keys = m.part.keys ?? [];
+      const total = keys.slice(1).reduce((sum, k) => sum + k.seconds, 0);
+      const loop = m.part.loop ?? 'once';
+      anim.time += anim.dir * DT;
+      let ended = false;
+      if (total <= 0) {
+        anim.time = anim.dir > 0 ? total : 0;
+        ended = true;
+      } else if (anim.time >= total || anim.time <= 0) {
+        if (loop === 'bounce') {
+          anim.time = Math.max(0, Math.min(total, anim.time));
+          anim.dir = -anim.dir;
+          this.circuit.pulseOut(m.id, 'done');
+        } else if (loop === 'loop' && anim.dir > 0) {
+          anim.time -= total;
+          this.circuit.pulseOut(m.id, 'done');
+        } else {
+          anim.time = Math.max(0, Math.min(total, anim.time));
+          ended = true;
+        }
+      }
+      const pose = poseAt(keys, anim.time);
+      for (const target of this.circuit.attachedTo(m.id)) {
+        if (target.dragged || target.inBody || target.area !== undefined) continue;
+        const base = (anim.bases[target.id] ??= { x: target.x, y: target.y, angle: target.angle });
+        this.physics.animate(target, base.x + pose.x, base.y + pose.y, base.angle + (pose.turn * Math.PI) / 180);
+      }
+      if (ended) {
+        anim.playing = false;
+        this.circuit.pulseOut(m.id, 'done');
+      }
+    }
+  }
+
+  // ---- choices ----
+
+  private startChoosing(id: number, who: number | null): void {
+    const p = this.circuit.part(id);
+    if (this.choosing || p?.part?.kind !== 'choice') return;
+    const options = p.part.options ?? [];
+    const c = p.owner !== undefined ? this.creatureById(p.owner) : (this.creatureById(who ?? -1) ?? this.creature);
+    if (!c || c.dead || c.hatching > 0 || options.length < 2) return;
+    this.choosing = { part: id, who: c.id, options: [...options], left: Math.max(1, Math.round((p.part.seconds ?? 2) * TICKS_PER_SECOND)) };
+    this.events.push({ type: 'choosing', who: c.id, options: [...options] });
+  }
+
+  // nothing moves but the creature's thinking. when it's thought long enough, it picks
+  private stepChoosing(): void {
+    const choosing = this.choosing as Choosing;
+    if (--choosing.left > 0) return;
+    this.choosing = null;
+    const p = this.circuit.part(choosing.part);
+    const c = this.creatureById(choosing.who);
+    if (!p?.live || !c) return;
+    const picked = this.pickChoice(c, choosing.options);
+    p.live.chose = choosing.options[picked];
+    (c.judging ??= []).push({ option: choiceKey(choosing.options[picked]), need: this.needTotal(c), at: this.tick });
+    this.circuit.fire(p.id, `o${picked + 1}`, c.id, true);
+    this.events.push({ type: 'chose', who: c.id, options: choosing.options, picked });
+  }
+
+  // what has turned out well before is likelier, with a little curiosity about what it has never tried
+  private pickChoice(c: Creature, options: string[]): number {
+    c.likes ??= {};
+    let best = 0;
+    let bestScore = -Infinity;
+    options.forEach((option, i) => {
+      const key = choiceKey(option);
+      const tried = key in c.likes;
+      const score = (c.likes[key] ?? 0) + (tried ? 0 : c.brain.genes.curiosity * 0.5) + this.rng.range(0, 0.3);
+      if (score > bestScore) {
+        best = i;
+        bestScore = score;
+      }
+    });
+    return best;
+  }
+
+  // a while after picking, it looks at whether it's better or worse off than it was
+  private judgeChoices(c: Creature): void {
+    const judging = c.judging ?? [];
+    c.judging = judging.filter((j) => {
+      if (this.tick - j.at < CHOICE_LEARN_TICKS) return true;
+      this.likeChoice(c, j.option, Math.max(-1, Math.min(1, (j.need - this.needTotal(c)) * 2)));
+      return false;
+    });
+  }
+
+  private likeChoice(c: Creature, option: string, how: number): void {
+    c.likes ??= {};
+    const was = c.likes[option] ?? 0;
+    c.likes[option] = Math.max(-1, Math.min(1, was + 0.35 * (how - was)));
+  }
+
+  // a pet or a slap just after it picked something is about that, too
+  private feelAboutChoice(c: Creature, how: number): void {
+    for (const j of c.judging ?? []) if (this.tick - j.at < 5 * TICKS_PER_SECOND) this.likeChoice(c, j.option, how);
+  }
+
+  // ---- Effects ----
+
+  private boostFrom(id: number, who: number | null, clear: boolean): void {
+    const p = this.circuit.part(id);
+    if (p?.part?.kind !== 'effect') return;
+    const c = p.owner !== undefined ? this.creatureById(p.owner) : (this.creatureById(who ?? -1) ?? this.creature);
+    if (!c) return;
+    c.boosts ??= [];
+    if (clear) {
+      c.boosts = c.boosts.filter((b) => b.from !== id);
+      return;
+    }
+    const seconds = p.part.seconds ?? 0;
+    const until = seconds > 0 ? this.tick + Math.round(seconds * TICKS_PER_SECOND) : null;
+    const mine = c.boosts.filter((b) => b.from === id);
+    // at the most it can stack, another one just makes them all last longer
+    if (mine.length >= (p.part.most ?? 10)) {
+      for (const b of mine) b.until = until;
+      return;
+    }
+    c.boosts.push({ stat: p.part.stat ?? 'speed', amount: p.part.amount ?? 0.2, until, from: id });
   }
 
   // ---- words ----
@@ -1077,12 +1634,32 @@ export class World {
     return added;
   }
 
-  addRoom(room: RoomData, dx = 0, dy = 0): number[] {
+  // into is a thing whose build area all of it goes in, for pasting into one
+  addRoom(room: RoomData, dx = 0, dy = 0, into?: number): number[] {
     for (const data of Object.values(room.textures ?? {})) this.addTexture(data);
-    const added = room.things.map((spec) => {
-      const edge = spec.inBody ? ROOM : this.size;
-      const y = spec.y === undefined ? undefined : Math.max(0, Math.min(edge.floor, spec.y + dy));
-      return this.add({ ...spec, x: Math.max(0, Math.min(edge.width, spec.x + dx)), y }).id;
+    if (into !== undefined) {
+      const ids = room.things.map((spec) => this.add({ ...spec, area: into, inBody: undefined, x: Math.max(0, Math.min(AREA.width, spec.x + dx)), y: Math.max(0, Math.min(AREA.floor, (spec.y ?? AREA_MIDDLE.y) + dy)) }).id);
+      for (const w of room.wires) if (ids[w.from] !== undefined && ids[w.to] !== undefined) this.connect(ids[w.from], w.out, ids[w.to], w.in);
+      return ids;
+    }
+    // a build area's parts go by position to their thing, so the things go in first and then what's in their areas
+    const added: number[] = [];
+    const place = (spec: ThingSpec, i: number): void => {
+      const inArea = spec.area !== undefined;
+      const area = inArea ? added[spec.area as number] : undefined;
+      if (inArea && area === undefined) return;
+      const edge = spec.inBody ? BODY_ROOM : inArea ? AREA : this.size;
+      // what's in a build area stays where it was in there, wherever its thing is put
+      const ox = inArea ? 0 : dx;
+      const oy = inArea ? 0 : dy;
+      const y = spec.y === undefined ? undefined : Math.max(0, Math.min(edge.floor, spec.y + oy));
+      added[i] = this.add({ ...spec, area, x: Math.max(0, Math.min(edge.width, spec.x + ox)), y }).id;
+    };
+    room.things.forEach((spec, i) => {
+      if (spec.area === undefined) place(spec, i);
+    });
+    room.things.forEach((spec, i) => {
+      if (spec.area !== undefined) place(spec, i);
     });
     for (const w of room.wires) {
       if (added[w.from] !== undefined && added[w.to] !== undefined) this.connect(added[w.from], w.out, added[w.to], w.in);
@@ -1225,6 +1802,8 @@ export class World {
   tell(action: Action, targetId: number | null, remember = true, c = this.creature): string | null {
     if (c.dead) return `${c.name} is dead. Bring them back first.`;
     if (needsTarget(action) && !this.targetOf(targetId)) return 'That needs something to do it to.';
+    if (this.thing(targetId)?.area !== undefined || this.thing(targetId)?.inBody) return "That isn't out in the room, so it can't go to it.";
+    if (this.thing(targetId)?.ignored) return `${this.thing(targetId)?.name} is set so creatures leave it alone. Right-click it to change that.`;
     if (action === 'grab' && this.creatureById(targetId ?? -1)) return "It can't carry another creature.";
     if (!needsTarget(action)) targetId = null;
     c.orders.push({ action, targetId, remember });
@@ -1294,6 +1873,7 @@ export class World {
 
   // the hand. praise or a slap land on whatever it has been doing for the last few seconds
   pet(c = this.creature): void {
+    this.feelAboutChoice(c, 1);
     if (c.dead) return;
     c.brain.pet(this.tick, TICKS_PER_SECOND);
     c.brain.notePlace(c.x, c.y - BODY.centreAboveFeet, 0.8);
@@ -1303,6 +1883,7 @@ export class World {
   }
 
   slap(c = this.creature): void {
+    this.feelAboutChoice(c, -1);
     if (c.dead) return;
     c.brain.slap(this.tick, TICKS_PER_SECOND);
     c.brain.notePlace(c.x, c.y - BODY.centreAboveFeet, -1);
@@ -1329,6 +1910,8 @@ export class World {
   }
 
   step(): void {
+    // a creature is picking from a Choice, and nothing else moves until it has
+    if (this.choosing) return this.stepChoosing();
     this.tick++;
     this.previous.clear();
     for (const t of this.things) if (!t.dragged) this.previous.set(t.id, { x: t.x, y: t.y, angle: t.angle });
@@ -1341,16 +1924,21 @@ export class World {
     this.runEffects();
     if (this.zones.length > 0 || this.things.some((t) => t.part?.kind === 'zone')) this.syncZones();
     for (const c of this.creatures) this.readDrives(c, this.circuit.takeCaused(c.id));
+    const items = this.things.filter((t) => t.item && !t.ignored && !t.hidden && !t.inBody && t.area === undefined);
     for (const c of this.creatures) {
       if (c.hiddenAway) continue;
       this.feelGravity(c);
       this.stepCreature(c);
       this.carryHeld(c);
+      this.stepGame(c, items);
     }
+    this.stepEnemies();
+    this.stepMovers();
     this.physics.step(this.things, this.creatures, this.zones.length > 0 ? (x, y) => {
       const zone = this.zoneAt(x, y);
       return zone ? this.pullOf(zone) : null;
     } : null);
+    this.stepBullets();
     this.stepRespawns();
     this.stepVoices();
     this.noticeNew();
@@ -1537,6 +2125,7 @@ export class World {
       else if (c.x > this.size.width - WALL_MARGIN && c.heading > 0) c.heading = -1;
     }
     if (c.floating) c.headingY = action === 'wander' ? this.rng.range(-0.8, 0.8) : 0;
+    if (c.boosts === undefined) c.boosts = [];
     c.doing = {
       action,
       targetId,
@@ -1591,7 +2180,7 @@ export class World {
     } else if (doing.action === 'wander') {
       // an easy stroll when all is well, hurrying when it needs something
       this.walk(c, c.heading, 0.7 + 0.5 * this.worstNeed(c));
-      if (c.floating) c.wantVy = c.headingY * WALK_SPEED * c.brain.genes.pace;
+      if (c.floating) c.wantVy = c.headingY * WALK_SPEED * c.brain.genes.pace * this.speedOf(c);
       if (this.gaveUp(c)) {
         c.heading *= -1; // something's in the way, so go back the other way
         c.stuck = 0;
@@ -1611,7 +2200,7 @@ export class World {
       return this.reach(c, doing, target);
     }
     const away = doing.action === 'avoid' ? -1 : 1;
-    const speed = WALK_SPEED * c.brain.genes.pace;
+    const speed = WALK_SPEED * c.brain.genes.pace * this.speedOf(c);
     this.walk(c, Math.sign(dx * away) || c.facing, 0);
     c.wantVx = (dx / distance) * speed * away;
     c.wantVy = (dy / distance) * speed * away;
@@ -1716,7 +2305,7 @@ export class World {
     else c.stuck = 0;
     c.lastX = c.x;
     if (c.stuck === 8 && this.physics.creatureGrounded(c.id)) {
-      c.hopSpeed = 430;
+      c.hopSpeed = 430 * Math.max(0.3, 1 + this.boost(c, 'jump') * 0.5);
       c.hop = true;
     }
     return c.stuck > 40;
@@ -1731,6 +2320,12 @@ export class World {
         other.shoved = Math.round(0.4 * TICKS_PER_SECOND);
       }
       return this.endAction(true, c);
+    }
+    // something with health gets hurt by a touch or a push, which is how a creature fights
+    if ((doing.action === 'touch' || doing.action === 'push') && target.health !== undefined && !target.dying) {
+      this.hurtThing(target.id, ATTACK * Math.max(0, 1 + this.boost(c, 'attack')), c.id, null);
+      this.circuit.takeCaused(c.id);
+      this.readDrives(c, true);
     }
     if (doing.action === 'touch') {
       this.touched(c, target);
@@ -1771,7 +2366,9 @@ export class World {
 
   // everything a touch sets off happens right now, so it counts for the action that's just finishing
   private touched(c: Creature, target: Thing): void {
+    if (target.item) return this.pickUp(c, target);
     const before = this.needs(c);
+    if (target.holds) this.open(c, target);
     let ate = false;
     if (target.give) ate = this.giveTo(target.give.drive, target.give.amount, c);
     if (target.part?.kind === 'button') this.circuit.press(target.id, c.id);
@@ -1783,18 +2380,23 @@ export class World {
     if (target.eaten) {
       const doing = c.doing;
       if (doing) doing.targetId = null; // so removing it doesn't end the action before it has learned from it
-      if (target.respawnSeconds) {
-        const wires = this.wires.filter((w) => w.from === target.id || w.to === target.id);
-        this.respawns.push({ spec: { ...specOf(target), x: target.home }, at: this.tick + Math.round(target.respawnSeconds * TICKS_PER_SECOND), id: target.id, wires });
-      }
-      this.remove(target.id);
+      this.goAway(target);
     }
+  }
+
+  // eaten, picked up or killed. it comes back later if it's set to, as the same thing with the same wires
+  private goAway(target: Thing): void {
+    if (target.respawnSeconds) {
+      const wires = this.wires.filter((w) => w.from === target.id || w.to === target.id);
+      this.respawns.push({ spec: { ...specOf(target), x: target.home }, at: this.tick + Math.round(target.respawnSeconds * TICKS_PER_SECOND), id: target.id, wires });
+    }
+    this.remove(target.id);
   }
 
   private walk(c: Creature, dir: number, pace: number): void {
     c.facing = dir;
     c.walking = true;
-    c.wantVx = dir * WALK_SPEED * pace * c.brain.genes.pace;
+    c.wantVx = dir * WALK_SPEED * pace * c.brain.genes.pace * this.speedOf(c);
   }
 
   private dropHeld(c: Creature): void {
@@ -1908,6 +2510,8 @@ export class World {
       size: this.size,
       gravity: this.gravity,
       trial: this.trial,
+      stores: this.stores,
+      choosing: this.choosing,
     });
   }
 
@@ -1915,6 +2519,8 @@ export class World {
     const saved = migrate(JSON.parse(text));
     const world = new World({ seed: 0, things: [], body: 'blank', size: saved.size, gravity: saved.gravity });
     world.trial = saved.trial ?? null;
+    world.stores = saved.stores ?? {};
+    world.choosing = saved.choosing ?? null;
     world.tick = saved.tick;
     world.rng.state = saved.rng;
     world.nextId = saved.nextId;
@@ -1923,6 +2529,8 @@ export class World {
     for (const t of saved.things as Thing[]) {
       // nobody is holding anything the moment a save is opened
       t.dragged = false;
+      // gravity zones are yellow now, so they stand out from what you build inside them
+      if (t.part?.kind === 'zone' && t.colour === 'blue') t.colour = 'yellow';
       world.things.push(t);
       world.index.set(t.id, t);
       world.physics.add(t);
@@ -1938,7 +2546,7 @@ export class World {
     // cantReach and heading arrived partway through an old version, so a save may not have them yet
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     for (const c of saved.creatures as any[]) {
-      const creature: Creature = { ...c, look: cleanLook(c.look), hatching: c.hatching ?? 0, cantReach: c.cantReach ?? {}, blockedAt: c.blockedAt ?? {}, heading: c.heading ?? 1, orders: c.orders ?? [], hearing: c.hearing ?? {}, wantVy: 0, floating: false, climbing: false, hopSpeed: 430, leap: null, hiddenAway: false, field: null, headingY: 0, dead: c.dead ?? false, deaths: c.deaths ?? 0, lastDeath: c.lastDeath ?? null, dragged: false, brain: Brain.load(c.brain) };
+      const creature: Creature = { ...c, look: cleanLook(c.look), hatching: c.hatching ?? 0, cantReach: c.cantReach ?? {}, blockedAt: c.blockedAt ?? {}, heading: c.heading ?? 1, orders: c.orders ?? [], hearing: c.hearing ?? {}, wantVy: 0, floating: false, climbing: false, hopSpeed: 430, leap: null, hiddenAway: false, field: null, headingY: 0, dead: c.dead ?? false, deaths: c.deaths ?? 0, lastDeath: c.lastDeath ?? null, dragged: false, inventory: c.inventory ?? {}, boosts: c.boosts ?? [], likes: c.likes ?? {}, brain: Brain.load(c.brain) };
       world.creatures.push(creature);
       world.physics.addCreature(creature.id, creature.x, creature.y);
       world.physics.placeCreature(creature.id, creature.x, creature.y);
@@ -1996,14 +2604,17 @@ export class World {
 // the circuit behind a part isn't something it looks at. a button is, because pressing one is how it gets to use
 // what you've built, and so is anything you've made solid, because it's in the way.
 function canSee(t: Thing): boolean {
-  if (t.hidden) return false; // what you can't see, it can't either
+  if (t.hidden || t.ignored || t.bullet || t.area !== undefined) return false; // what you can't see, it can't either
   return !t.part || t.part.kind === 'button' || t.solid;
 }
 
 // what goes in a file: only what you built, not words hanging in the air or things a spawner made
 function belongsInFile(t: Thing): boolean {
-  return !t.inBody && !t.voice && !t.spawned;
+  return !t.inBody && !t.voice && !t.spawned && !t.bullet;
 }
+
+// Storage goes by its name, however it's written
+export const storeKey = (name: string): string => name.trim().toLowerCase();
 
 const wordChannel = (word: string): string => `"${word}"`;
 const describeSeen = (p: Percept): string => `${p.size} ${p.colour} ${p.shape}`;
@@ -2108,4 +2719,24 @@ function migrateV1(saved: any): any {
       cantReach: {},
     },
   };
+}
+
+const choiceKey = (option: string): string => option.trim().toLowerCase();
+
+// where a Mover's keyframes say it is this far in, gliding smoothly between them
+export function poseAt(keys: { x: number; y: number; turn: number; seconds: number }[], time: number): { x: number; y: number; turn: number } {
+  if (keys.length === 0) return { x: 0, y: 0, turn: 0 };
+  let at = 0;
+  for (let i = 1; i < keys.length; i++) {
+    const a = keys[i - 1];
+    const b = keys[i];
+    if (time <= at + b.seconds || i === keys.length - 1) {
+      const f = b.seconds <= 0 ? 1 : Math.max(0, Math.min(1, (time - at) / b.seconds));
+      const smooth = f * f * (3 - 2 * f);
+      return { x: a.x + (b.x - a.x) * smooth, y: a.y + (b.y - a.y) * smooth, turn: a.turn + (b.turn - a.turn) * smooth };
+    }
+    at += b.seconds;
+  }
+  const last = keys[keys.length - 1];
+  return { x: last.x, y: last.y, turn: last.turn };
 }

@@ -5,9 +5,10 @@ import type { Colour } from '../sim/senses.ts';
 import { boundingRadius, corners, localCorners } from '../sim/shapes.ts';
 import type { Form } from '../sim/shapes.ts';
 import { stageSize } from '../sim/family.ts';
-import { ROOM } from '../sim/world.ts';
+import { AREA, AREA_MIDDLE, BODY_ROOM, ROOM } from '../sim/world.ts';
 import type { Creature, Thing, World, WorldEvent } from '../sim/world.ts';
 import { CircuitView } from './circuit-view.ts';
+import { DECOR_ART, pixiPen } from './decor-art.ts';
 import type { WireOverlay } from './circuit-view.ts';
 import { drawEgg, drawNurt, STILL_POSE } from './nurt-art.ts';
 
@@ -88,8 +89,11 @@ export interface Overlay {
   ghost: Ghost | null;
   box: { x1: number; y1: number; x2: number; y2: number } | null;
   gizmo: Gizmo | null;
+  handles: { x: number; y: number }[]; // the corners you drag to change a thing's size
   wires: WireOverlay;
 }
+
+export type View = 'room' | 'body' | 'area';
 
 export class Scene {
   app = new Application();
@@ -99,6 +103,10 @@ export class Scene {
   private hillsNear = new Graphics();
   private backdrop = new Graphics();
   private bodyBackdrop = new Graphics();
+  private areaBackdrop = new Graphics();
+  private areaLayer = new Graphics(); // the thing whose build area this is, standing in the middle
+  private areaTitle = new Text({ text: '', style: { fontFamily: 'sans-serif', fontSize: 22, fontWeight: 'bold', fill: 0x8fe3d6 } });
+  private labels = new Map<number, Text>();
   private pictureLayer = new Container();
   private worldLayer = new Graphics();
   private painted = new Map<number, { g: Graphics; drawn: string }>();
@@ -122,8 +130,9 @@ export class Scene {
   private roomSize: { width: number; height: number; floor: number } = ROOM;
   private drawnSize = '';
   private camera = { x: 0, y: 0, zoom: 1 };
-  private otherCamera: { x: number; y: number; zoom: number } | null = null; // wherever the other view was left
-  view: 'room' | 'body' = 'room';
+  private cameras = new Map<string, { x: number; y: number; zoom: number }>(); // wherever each view was left
+  view: View = 'room';
+  area: number | null = null; // whose build area, when looking at one
   private lastSize = { w: 0, h: 0 };
 
   async start(host: HTMLElement): Promise<void> {
@@ -138,30 +147,39 @@ export class Scene {
     // the host can change size without the window changing, like when the toolbar wraps onto a second line
     new ResizeObserver(() => this.app.resize()).observe(host);
     // parts hang on the wall behind everything, but wires go over the top so you can always see and click them
-    this.root.addChild(this.sky, this.hillsFar, this.hillsNear, this.backdrop, this.bodyBackdrop, this.circuits.chips, this.pictureLayer, this.worldLayer, this.creatureLayer, this.circuits.wires, this.circuits.moving, this.fxLayer, this.overlayLayer, this.textLayer);
-    this.textLayer.addChild(this.angleLabel);
+    this.root.addChild(this.sky, this.hillsFar, this.hillsNear, this.backdrop, this.bodyBackdrop, this.areaBackdrop, this.areaLayer, this.circuits.chips, this.pictureLayer, this.worldLayer, this.creatureLayer, this.circuits.wires, this.circuits.moving, this.fxLayer, this.overlayLayer, this.textLayer);
+    this.textLayer.addChild(this.angleLabel, this.areaTitle);
+    this.areaTitle.anchor.set(0.5, 1);
     this.app.stage.addChild(this.root);
     this.drawBackdrop();
   }
 
-  // looking inside the creature is the same kind of canvas as the room, somewhere else
-  setView(view: 'room' | 'body'): void {
-    if (view === this.view) return;
-    const here = this.camera;
+  // looking inside the creature, or at a thing's build area, is the same kind of canvas as the room, somewhere else
+  setView(view: View, area: number | null = null): void {
+    if (view === this.view && area === this.area) return;
+    this.cameras.set(this.viewKey, this.camera);
     this.view = view;
+    this.area = view === 'area' ? area : null;
     for (const layer of [this.sky, this.hillsFar, this.hillsNear, this.backdrop]) layer.visible = view === 'room';
     this.bodyBackdrop.visible = view === 'body';
-    for (const layer of [this.pictureLayer, this.worldLayer, this.creatureLayer, this.fxLayer]) layer.visible = view === 'room';
-    if (this.otherCamera) {
-      this.camera = this.otherCamera;
+    this.areaBackdrop.visible = this.areaLayer.visible = this.areaTitle.visible = view === 'area';
+    for (const layer of [this.pictureLayer, this.worldLayer, this.creatureLayer]) layer.visible = view === 'room';
+    const kept = this.cameras.get(this.viewKey);
+    if (kept) {
+      this.camera = kept;
     } else {
-      // close enough to fill the window, with the starter body in the middle
-      this.camera = { x: 0, y: 0, zoom: Math.max(this.app.screen.width / 1000, this.app.screen.height / ROOM.height) };
+      // close enough to fill the window, with the starter body, or the thing, in the middle
+      this.camera = { x: 0, y: 0, zoom: Math.max(this.app.screen.width / 1000, this.app.screen.height / ROOM.height) * (view === 'area' ? 1.5 : 1) };
       this.clampCamera();
-      this.centreOn(850, 620);
+      if (view === 'area') this.lookAt(AREA_MIDDLE.x, AREA_MIDDLE.y);
+      else this.centreOn(850, 620);
     }
-    this.otherCamera = here;
     this.clampCamera();
+  }
+
+  // each build area keeps its own view, the same as the room and the inside of a creature
+  private get viewKey(): string {
+    return this.view === 'area' ? `area:${this.area}` : this.view;
   }
 
   get zoom(): number {
@@ -170,7 +188,7 @@ export class Scene {
 
   // the canvas being looked at. the inside of a creature is the same size whatever the room is
   private get bounds(): { width: number; height: number; floor: number } {
-    return this.view === 'body' ? ROOM : this.roomSize;
+    return this.view === 'body' ? BODY_ROOM : this.view === 'area' ? AREA : this.roomSize;
   }
 
   // the Settings changed. the backdrop is drawn once, so it's drawn again if it should look different
@@ -365,15 +383,25 @@ export class Scene {
     g.rect(0, -3, width, 3).fill(0x3a4160);
 
     const b = this.bodyBackdrop.clear();
-    b.rect(0, 0, ROOM.width, ROOM.height).fill(0x241822);
-    for (let x = 0; x <= ROOM.width; x += 40) b.moveTo(x, 0).lineTo(x, ROOM.height);
-    for (let y = 0; y <= ROOM.height; y += 40) b.moveTo(0, y).lineTo(ROOM.width, y);
+    b.rect(0, 0, BODY_ROOM.width, BODY_ROOM.height).fill(0x241822);
+    for (let x = 0; x <= BODY_ROOM.width; x += 40) b.moveTo(x, 0).lineTo(x, BODY_ROOM.height);
+    for (let y = 0; y <= BODY_ROOM.height; y += 40) b.moveTo(0, y).lineTo(BODY_ROOM.width, y);
     b.stroke({ width: 1, color: 0x3a2636, alpha: 0.7 });
     // soft glows, like the inside of something alive
-    for (const [x, y, r] of [[420, 300, 360], [1500, 640, 420], [1050, 140, 260]]) {
+    for (const [x, y, r] of [[420, 300, 360], [1500, 640, 420], [1050, 140, 260], [3200, 1400, 700], [5600, 900, 600], [2400, 3400, 800], [6200, 3600, 700]]) {
       for (let i = 4; i >= 1; i--) b.circle(x, y, (r * i) / 4).fill({ color: 0x5a2a4a, alpha: 0.05 });
     }
     this.bodyBackdrop.visible = this.view === 'body';
+
+    // a build area: a workbench, with rings round the middle where the thing stands
+    const a = this.areaBackdrop.clear();
+    a.rect(0, 0, AREA.width, AREA.height).fill(0x12221f);
+    for (let x = 0; x <= AREA.width; x += 40) a.moveTo(x, 0).lineTo(x, AREA.height);
+    for (let y = 0; y <= AREA.height; y += 40) a.moveTo(0, y).lineTo(AREA.width, y);
+    a.stroke({ width: 1, color: 0x1f3a35, alpha: 0.8 });
+    for (let i = 5; i >= 1; i--) a.circle(AREA_MIDDLE.x, AREA_MIDDLE.y, i * 90).fill({ color: 0x2a5a50, alpha: 0.05 });
+    a.circle(AREA_MIDDLE.x, AREA_MIDDLE.y, 180).stroke({ width: 2, color: 0x4fd6c3, alpha: 0.25 });
+    this.areaBackdrop.visible = this.view === 'area';
   }
 
   private faceOf(c: Creature): Face {
@@ -392,7 +420,24 @@ export class Scene {
         for (let i = 0; i < 18; i++) this.spawn('crumb', event.x, event.y, rand(-200, 200), rand(-260, 60), 0.7, rand(2.5, 5.5), COLOURS[event.colour]);
         continue;
       }
-      if (event.type === 'pulse' || event.type === 'loop' || event.type === 'said' || event.type === 'sound' || event.type === 'solved') continue;
+      if (event.type === 'hurt') {
+        this.spawn('zzz', event.x + rand(-8, 8), event.y - 6, rand(-20, 20), -60, 0.9, 15, event.amount > 0 ? 0xff6b6b : 0x6be3a1, `${event.amount > 0 ? '-' : '+'}${Math.round(Math.abs(event.amount) * 10) / 10}`);
+        continue;
+      }
+      if (event.type === 'killed') {
+        for (let i = 0; i < 16; i++) this.spawn('crumb', event.x, event.y, rand(-220, 220), rand(-280, 40), 0.7, rand(3, 6), COLOURS[event.colour]);
+        this.spawn('ring', event.x, event.y, 0, 0, 0.5, 30, 0xffffff);
+        continue;
+      }
+      if (event.type === 'fired') {
+        if (event.style === 'aura') this.spawn('ring', event.x, event.y, 0, 0, 0.45, event.range, COLOURS[event.colour]);
+        continue;
+      }
+      if (event.type === 'picked' || event.type === 'looted') {
+        for (let i = 0; i < 8; i++) this.spawn('star', event.x, event.y, rand(-90, 90), rand(-160, -40), 0.6, rand(3, 6), 0xffe27a);
+        continue;
+      }
+      if (event.type === 'pulse' || event.type === 'loop' || event.type === 'said' || event.type === 'sound' || event.type === 'solved' || event.type === 'choosing' || event.type === 'chose') continue;
       const c = world.creatureById(event.who);
       if (!c) continue;
       const face = this.faceOf(c);
@@ -473,12 +518,35 @@ export class Scene {
     this.drawThings(world, glide, overlay);
     this.drawCreatures(world);
     const poseOf = (t: Thing): { x: number; y: number; angle: number } => {
+      // in its build area, a thing stands still in the middle, wherever it really is
+      if (this.view === 'area' && t.id === this.area) return { ...AREA_MIDDLE, angle: 0 };
       const was = world.previous.get(t.id);
       return was ? { x: was.x + (t.x - was.x) * glide, y: was.y + (t.y - was.y) * glide, angle: was.angle + (t.angle - was.angle) * glide } : t;
     };
+    this.drawAreaOwner(world);
     this.circuits.draw(world, cam.zoom, dt, poseOf, overlay.wires);
     this.drawParticles(dt);
     this.drawOverlay(overlay, world);
+  }
+
+  // the thing whose build area this is, in the middle, so you can wire straight to it
+  private drawAreaOwner(world: World): void {
+    const g = this.areaLayer.clear();
+    const t = this.view === 'area' ? world.thing(this.area) : undefined;
+    if (!t) {
+      this.areaTitle.visible = false;
+      return;
+    }
+    const { x, y } = AREA_MIDDLE;
+    const picture = t.decor ? null : this.pictureFor(world, t);
+    if (picture) {
+      this.shapePath(g, t.form, t.hw, t.hh, x, y, 0);
+      g.fill({ texture: picture, textureSpace: 'local', color: 0xffffff });
+    }
+    this.drawThing(g, t, x, y, 0, !!picture);
+    this.areaTitle.visible = true;
+    this.areaTitle.text = `${t.name}'s build area`;
+    this.areaTitle.position.set(x, y - boundingRadius(t) - 28);
   }
 
   private drawThings(world: World, glide: number, overlay: Overlay): void {
@@ -487,7 +555,7 @@ export class Scene {
     // soft shadows on the floor under anything near it, drawn first so everything stands on them
     const floor = this.roomSize.floor;
     for (const t of world.things) {
-      if (t.inBody || t.voice || t.part || (t.hidden && this.playing)) continue;
+      if (t.inBody || t.voice || t.part || t.bullet || (t.hidden && this.playing)) continue;
       const reach = boundingRadius(t);
       const gap = floor - (t.y + reach);
       if (gap > 160 || gap < -reach) continue;
@@ -496,8 +564,16 @@ export class Scene {
     }
     const stillPainted = new Set<number>();
     const stillVoices = new Set<number>();
+    const stillLabels = new Set<number>();
     for (const t of world.things) {
-      if (t.inBody) continue;
+      if (t.inBody || t.area !== undefined) continue;
+      if (t.bullet) {
+        // a spark from an Ability
+        g.circle(t.x, t.y, t.hw * 2).fill({ color: COLOURS[t.colour], alpha: 0.25 });
+        g.circle(t.x, t.y, t.hw).fill(COLOURS[t.colour]);
+        g.circle(t.x, t.y, t.hw * 0.5).fill(0xffffff);
+        continue;
+      }
       const was = world.previous.get(t.id);
       const pose = was ? { x: was.x + (t.x - was.x) * glide, y: was.y + (t.y - was.y) * glide, angle: was.angle + (t.angle - was.angle) * glide } : t;
       if (t.voice) {
@@ -513,9 +589,19 @@ export class Scene {
           this.paint(t, picture, pose.x, pose.y, pose.angle);
         }
         this.drawThing(g, t, pose.x, pose.y, pose.angle, !!picture);
+        this.drawGameBits(g, t, pose.x, pose.y);
+      }
+      if (t.label && !(t.hidden && this.playing)) {
+        stillLabels.add(t.id);
+        this.drawLabel(t, pose.x, pose.y);
       }
       if (doing?.targetId === t.id) this.drawAttention(g, t, pose.x, pose.y);
       if (overlay.selected.has(t.id)) this.outline(g, t, pose.x, pose.y, pose.angle, SELECT, 2.5);
+    }
+    for (const [id, words] of this.labels) {
+      if (stillLabels.has(id)) continue;
+      words.destroy();
+      this.labels.delete(id);
     }
     for (const [id, words] of this.voices) {
       if (stillVoices.has(id)) continue;
@@ -526,6 +612,49 @@ export class Scene {
       if (stillPainted.has(id)) continue;
       one.g.destroy();
       this.painted.delete(id);
+    }
+  }
+
+  // words over a thing, for the player
+  private drawLabel(t: Thing, x: number, y: number): void {
+    let words = this.labels.get(t.id);
+    if (!words) {
+      words = new Text({ text: '', style: { fontFamily: 'sans-serif', fontSize: 14, fontWeight: 'bold', fill: 0xffffff, stroke: { color: 0x0d0f16, width: 4 } } });
+      words.anchor.set(0.5, 1);
+      this.labels.set(t.id, words);
+      this.textLayer.addChild(words);
+    }
+    if (words.text !== t.label) words.text = t.label ?? '';
+    words.position.set(x, y - boundingRadius(t) - (t.health !== undefined ? 14 : 6));
+    words.visible = this.view === 'room';
+  }
+
+  // a health bar once it's been hurt, and while building, small marks for what else it's set up as
+  private drawGameBits(g: Graphics, t: Thing, x: number, y: number): void {
+    const top = y - boundingRadius(t) - 8;
+    if (t.health !== undefined && t.hp !== undefined && t.health < t.hp) {
+      const w = Math.max(24, Math.min(90, t.hw * 2));
+      const left = Math.max(0, t.health / t.hp);
+      g.roundRect(x - w / 2 - 1, top - 1, w + 2, 6, 3).fill({ color: 0x0d0f16, alpha: 0.75 });
+      g.roundRect(x - w / 2, top, w * left, 4, 2).fill(left > 0.5 ? 0x6be3a1 : left > 0.25 ? 0xffc24d : 0xff5a5a);
+    }
+    // a plain shape that's an enemy gets a scowl, so you can tell
+    if (t.enemy && !t.decor && !t.texture) {
+      const dir = Math.sign(t.vx) || 1;
+      const s = Math.max(2.5, Math.min(t.hw, t.hh) * 0.18);
+      for (const dx of [-s * 1.4, s * 1.4]) {
+        g.circle(x + dx + dir * s, y - s, s).fill(0xffffff);
+        g.circle(x + dx + dir * s * 1.4, y - s * 0.8, s * 0.5).fill(0x14161f);
+      }
+      g.moveTo(x - s * 2.6 + dir * s, y - s * 2.6).lineTo(x - s * 0.4 + dir * s, y - s * 1.8).stroke({ width: s * 0.5, color: 0x14161f });
+      g.moveTo(x + s * 2.6 + dir * s, y - s * 2.6).lineTo(x + s * 0.4 + dir * s, y - s * 1.8).stroke({ width: s * 0.5, color: 0x14161f });
+    }
+    if (this.playing) return;
+    if (t.ignored) {
+      // a crossed-out circle: creatures leave this alone
+      const r = 5;
+      g.circle(x + t.hw * 0.6, y - t.hh * 0.6, r).stroke({ width: 1.5, color: 0xff8a8a, alpha: 0.9 });
+      g.moveTo(x + t.hw * 0.6 - r * 0.7, y - t.hh * 0.6 - r * 0.7).lineTo(x + t.hw * 0.6 + r * 0.7, y - t.hh * 0.6 + r * 0.7).stroke({ width: 1.5, color: 0xff8a8a, alpha: 0.9 });
     }
   }
 
@@ -611,6 +740,12 @@ export class Scene {
     const fade = t.hidden ? 0.2 : t.solid ? 1 : 0.45;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
+    const art = t.decor && !painted ? DECOR_ART[t.decor] : undefined;
+    if (art) {
+      // a decoration is drawn as itself, and doesn't fade when you can walk through it, since that's what scenery is for
+      art(pixiPen(g, x, y, t.hw, t.hh, angle, this.still ? 0 : this.time, t.hidden ? 0.25 : 1));
+      return;
+    }
     if (!painted) {
       this.shapePath(g, t.form, t.hw, t.hh, x, y, angle);
       g.fill({ color: colour, alpha: fade });
@@ -661,10 +796,11 @@ export class Scene {
     this.angleLabel.visible = false;
 
     // the room's things show being selected on their own layer, which is hidden while looking inside
-    if (this.view === 'body') {
+    if (this.view !== 'room') {
       for (const id of overlay.selected) {
         const t = world.thing(id);
-        if (t) this.outline(g, t, t.x, t.y, t.angle, SELECT, 2.5);
+        if (t && id === this.area) this.outline(g, t, AREA_MIDDLE.x, AREA_MIDDLE.y, 0, SELECT, 2.5);
+        else if (t) this.outline(g, t, t.x, t.y, t.angle, SELECT, 2.5);
       }
     }
 
@@ -673,6 +809,11 @@ export class Scene {
       this.shapePath(g, s.form, s.hw, s.hh, s.x, s.y, s.angle);
       g.fill({ color: COLOURS[s.colour], alpha: 0.5 });
       this.outline(g, s, s.x, s.y, s.angle, 0xffffff, 1.5);
+    }
+
+    for (const h of overlay.handles) {
+      g.rect(h.x - 5 * px, h.y - 5 * px, 10 * px, 10 * px).fill(0xffffff);
+      g.rect(h.x - 5 * px, h.y - 5 * px, 10 * px, 10 * px).stroke({ width: 1.5 * px, color: SELECT });
     }
 
     if (overlay.box) {

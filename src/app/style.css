@@ -1703,3 +1703,193 @@ button:disabled {
   opacity: 0.45;
   cursor: default;
 }
+
+/* the game: Storage and what your creature carries, shown at the top while you build and while you play */
+#game-hud {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+  max-width: 260px;
+  padding: 8px 12px;
+  background: rgb(18 20 29 / 82%);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+#game-hud[hidden] {
+  display: none;
+}
+
+.game-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.game-row b {
+  color: #ffe27a;
+  font-variant-numeric: tabular-nums;
+}
+
+.game-head {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.in-body #game-hud {
+  display: none;
+}
+
+/* a creature stopped to choose, with everything else waiting */
+#choice-box {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  padding: 18px 22px;
+  background: rgb(18 20 29 / 90%);
+  border: 1px solid var(--accent);
+  border-radius: 16px;
+  box-shadow: 0 16px 50px rgb(0 0 0 / 55%);
+  pointer-events: none;
+}
+
+#choice-box[hidden] {
+  display: none;
+}
+
+#choice-title {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+#choice-options {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  max-width: min(560px, 80vw);
+}
+
+.choice-card {
+  min-width: 96px;
+  padding: 14px 16px;
+  text-align: center;
+  font-weight: 700;
+  background: var(--panel-2);
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  transition: border-color 0.15s, transform 0.15s, opacity 0.2s;
+}
+
+.choice-card.thinking {
+  border-color: var(--accent);
+  transform: translateY(-3px);
+}
+
+.choice-card.picked {
+  border-color: var(--good);
+  background: rgb(107 227 161 / 18%);
+  transform: scale(1.08);
+}
+
+.choice-card.passed {
+  opacity: 0.4;
+}
+
+/* decorations */
+#decor-menu {
+  width: min(640px, calc(100vw - 16px));
+  gap: 8px;
+}
+
+#decor-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+#decor-tabs button {
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+#decor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 6px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.decor-item {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  padding: 6px 4px;
+  font-size: 11px;
+  line-height: 1.15;
+  background: var(--panel-2);
+}
+
+.decor-item canvas {
+  display: block;
+}
+
+.decor-item span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#asset-menu {
+  width: 240px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.asset-row {
+  display: flex;
+  gap: 4px;
+}
+
+.asset-row button:first-child {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the top of the right-click panel: a thing's build area, and whether creatures can use it */
+.prop-quick {
+  display: grid;
+  gap: 6px;
+}
+
+.prop-area {
+  padding: 6px 10px;
+  font-weight: 700;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.prop-size {
+  margin-top: 6px;
+}

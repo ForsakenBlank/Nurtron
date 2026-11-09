@@ -2,6 +2,8 @@
 // files come from other people, so a file is only ever data, and everything in it is checked before use.
 import { cleanColour, cleanPart, PART_INFO, portKind, toolSize, whereOf } from './parts.ts';
 import type { Part, PartKind, ToolPort } from './parts.ts';
+import { cleanEnemy, cleanHolds } from './game.ts';
+import { DECOR_IDS } from './decor.ts';
 import { FORMS } from './shapes.ts';
 import type { Form } from './shapes.ts';
 import { textureId, usableTexture } from './textures.ts';
@@ -17,13 +19,14 @@ const MOST_INSIDE_A_TOOL = 200;
 const MOST_TOOL_PORTS = 24;
 const MOST_TEXTURES = 200;
 export const MOST_FILE_TEXT = 40_000_000; // nothing real comes close to this, and it stops a giant file before it's read
-export const SIZE_LIMITS = { min: 4, max: 400 };
+// half a thing's width or height. big enough for a whole floor or wall in one piece
+export const SIZE_LIMITS = { min: 2, max: 20000 };
 
 // which side of the wall something belongs on: out in the room, or inside a creature
 export type Place = 'room' | 'body';
 
 // what can be sealed inside a tool. anything you need to see or get at, like a shape or a button, has to stay out here
-export const SEALABLE: ReadonlySet<PartKind> = new Set<PartKind>(['label', 'data', 'timer', 'math', 'compare', 'switch', 'motor', 'give', 'drive', 'nerve', 'action', 'feel', 'die', 'logic', 'random', 'delay', 'spawner', 'destroy', 'teleport', 'where', 'hit', 'show', 'paint', 'keyboard', 'mouse', 'camera', 'sound', 'hear', 'goal']);
+export const SEALABLE: ReadonlySet<PartKind> = new Set<PartKind>(['label', 'data', 'timer', 'math', 'compare', 'switch', 'motor', 'give', 'drive', 'nerve', 'action', 'feel', 'die', 'logic', 'random', 'delay', 'spawner', 'destroy', 'teleport', 'where', 'hit', 'show', 'paint', 'keyboard', 'mouse', 'camera', 'sound', 'hear', 'goal', 'combine', 'chance', 'storage', 'items', 'mover', 'hurt', 'choice', 'effect', 'ability']);
 
 export function saveRoom(world: World): string {
   return JSON.stringify({ type: FILE_TYPE, version: FILE_VERSION, ...world.roomForFile() }, null, 1);
@@ -70,6 +73,14 @@ export function cleanRoom(raw: unknown, place: Place): RoomData {
     total += 1 + (spec.part?.tool?.things.length ?? 0);
   });
   if (total > MOST_THINGS) throw new Error(`That has more than ${MOST_THINGS} things in it, counting what's inside its tools.`);
+  // a build area belongs to a thing by position, so it follows anything that got dropped. one whose thing isn't there,
+  // or isn't a plain thing out in the room, comes out into the room instead
+  for (const spec of things) {
+    if (spec.area === undefined) continue;
+    const at = moved.get(spec.area);
+    if (at === undefined || things[at].area !== undefined || things[at].part || !spec.part) delete spec.area;
+    else spec.area = at;
+  }
   const room: RoomData = { things, wires: keepWires(wires, moved), textures: cleanTextures(file.textures) };
   const size = file.size as { width?: unknown; height?: unknown } | undefined;
   if (size && typeof size === 'object') {
@@ -125,6 +136,7 @@ function cleanTool(raw: Record<string, unknown>, place: Place): Part | undefined
     if (!SEALABLE.has(part?.kind as PartKind)) return;
     const spec = cleanThing(one, place);
     if (!spec?.part) return; // it had to go, because it doesn't belong in this place
+    delete spec.area;
     moved.set(i, things.length);
     things.push(spec);
   });
@@ -182,6 +194,19 @@ function cleanThing(raw: unknown, place: Place): ThingSpec | null {
     if (tags.length) spec.tags = tags;
   }
   if (typeof t.texture === 'string' && /^t[a-z0-9]{1,20}$/.test(t.texture)) spec.texture = t.texture;
+  if (t.ignored === true) spec.ignored = true;
+  if (typeof t.label === 'string' && t.label.trim()) spec.label = t.label.slice(0, 60);
+  if (typeof t.decor === 'string' && DECOR_IDS.has(t.decor)) spec.decor = t.decor;
+  if (place !== 'body') {
+    if (t.item === true) spec.item = true;
+    if (typeof t.hp === 'number' && Number.isFinite(t.hp)) spec.hp = number(t.hp, 100, 1, 1e9);
+    const enemy = cleanEnemy(t.enemy);
+    if (enemy) spec.enemy = enemy;
+    const holds = cleanHolds(t.holds);
+    if (holds) spec.holds = holds;
+    // a build area goes by position in the file, which gets checked once everything is in
+    if (Number.isInteger(t.area) && (t.area as number) >= 0) spec.area = t.area as number;
+  }
   // what belongs inside a creature can't come in from a room file, and a room file can't say what's inside one.
   // the same goes the other way, for things that only work out in the room.
   if (part) {
