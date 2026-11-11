@@ -81,6 +81,7 @@ export function mergeInto(main: Brain, base: Knowledge, ghosts: Knowledge[], mai
     result.perGhost = ghosts.map(() => 0);
     return result;
   }
+  const channels = base.driveNames.length + 1;
   for (const ghost of ghosts) {
     if (ghost.driveNames.join('\u0000') !== key) {
       result.skipped++;
@@ -102,7 +103,11 @@ export function mergeInto(main: Brain, base: Knowledge, ghosts: Knowledge[], mai
         } else {
           const mc = main.concepts[mi];
           for (let i = 0; i < mc.w.length && i < gc.w.length; i++) {
-            const d = open(gc.w[i]) - open(was.w[i]);
+            // channel 0 is how it felt about doing something for its own sake: pets, slaps and dying. a ghost that
+            // keeps dying and coming back would otherwise make the real one terrified of everything, so those are
+            // averaged across ghosts. what helps each need is added up
+            const share = i % channels === 0 ? 1 / ghosts.length : 1;
+            const d = (open(gc.w[i]) - open(was.w[i])) * share;
             if (d === 0) continue;
             const before = mc.w[i];
             mc.w[i] = shut(open(before) + d);

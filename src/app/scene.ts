@@ -477,6 +477,12 @@ export class Scene {
         const midX = other ? (headX + this.faceOf(other).head.x) / 2 : headX;
         for (let i = 0; i < 5; i++) this.spawn('heart', midX + rand(-14, 14), headY + 10, rand(-25, 25), rand(-80, -40), 1.2, rand(6, 10), 0xff9cc0);
       } else if (event.type === 'touched') {
+        // a button it pressed flashes, so you can see it really pressed it
+        const button = event.pressed ? world.thing(event.thingId) : undefined;
+        if (button) {
+          this.spawn('ring', button.x, button.y, 0, 0, 0.5, button.hw + 4, 0xffffff);
+          this.spawn('ring', button.x, button.y, 0, 0, 0.8, button.hw + 12, c.look.belly);
+        }
         if (event.ate && !event.cuddle) {
           face.happy = Math.max(face.happy, 0.7);
           for (let i = 0; i < 10; i++) this.spawn('crumb', headX + c.facing * 22, headY + 34, rand(-90, 90), rand(-150, -30), 0.5, rand(2, 4), COLOURS.red);

@@ -280,6 +280,7 @@ async function boot(): Promise<void> {
                 <button data-order="call">Call out</button>
                 <button data-order="wander">Wander</button>
                 <button data-order="drop">Drop it</button>
+                <button id="soothe" title="Comfort it. Everything it thinks went badly counts half as much, so a creature that's been slapped, has died a lot, or has learned something wrong will try things again. What it knows helps stays.">Calm it down</button>
               </div>
               <form id="say-box">
                 <input id="say-word" maxlength="24" spellcheck="false" placeholder="Say a word" aria-label="Say a word" />
@@ -803,7 +804,7 @@ async function boot(): Promise<void> {
   });
   const fixedBox = $<HTMLInputElement>('new-fixed');
   fixedBox.addEventListener('change', () => {
-    editor.newFixed = fixedBox.checked;
+    editor.setNewFixed(fixedBox.checked);
   });
   let toolsReady = false;
   function syncToolbar(): void {
@@ -2375,6 +2376,26 @@ async function boot(): Promise<void> {
   document.querySelectorAll<HTMLButtonElement>('[data-order]').forEach((b) => {
     b.addEventListener('click', () => tell(b.dataset.order as Action, null));
   });
+  $('soothe').addEventListener('click', () => {
+    const c = world.creature;
+    const calmed = c.brain.soothe();
+    learnedKey = '';
+    toast(calmed ? `${c.name} feels safer. What went badly counts half as much now, so it'll give things another go.` : `${c.name} isn't scared of anything right now.`);
+  });
+  // a creature scared of almost everything won't even eat, so it's worth saying so, now and then
+  const warnedScared = new Map<number, number>();
+  function warnIfScared(): void {
+    for (const c of world.creatures) {
+      if (c.dead || c.brain.fearfulness() < 0.45) continue;
+      const last = warnedScared.get(c.id) ?? -Infinity;
+      if (performance.now() - last < 5 * 60_000) continue;
+      warnedScared.set(c.id, performance.now());
+      toast(`${c.name} has become scared of nearly everything, from slaps or dying, so it may not even eat. Calm it down, in its mind panel, helps.`);
+    }
+  }
+  window.setInterval(() => {
+    if (!inMenu && !home) warnIfScared();
+  }, 20_000);
 
   function renderLearned(): void {
     const brain = world.creature.brain;
@@ -2416,6 +2437,10 @@ async function boot(): Promise<void> {
       if (event.type === 'petted') guide.mark('pet');
       else if (event.type === 'touched' && event.ate && !event.cuddle) guide.mark('eat');
       else if (event.type === 'decided' && event.told && event.decision.chosen.percept) guide.mark('tell');
+      if (event.type === 'shutIn') {
+        const c = world.creatureById(event.who);
+        if (c) toast(`${c.name} keeps finding it can't get to things from where it is. It might be shut in: drag it somewhere more open, or make a way out.`);
+      }
       if (event.type === 'died') {
         const c = world.creatureById(event.who);
         if (c) toast(`${c.name} has died. ${event.who === world.focusId ? event.lesson : 'Click them to see what went wrong.'}`);

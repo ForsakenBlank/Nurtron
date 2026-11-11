@@ -115,3 +115,28 @@ lots of machines at once.
   start to get in each other's way.
 - A share of every ghost's learning took about 2 to 3 milliseconds with 4 dimensions.
 - Threads were checked starting and running inside the desktop app as well as the browser.
+
+## 1.17: bug fixes from a real world
+
+A creature in a real world stopped eating, its buttons seemed not to work, and its counters seemed stuck. Running a copy
+of that world found these, all fixed:
+
+- **Right-clicking a button next to a creature slapped the creature.** The creature's click area was loose and won
+  over anything under the mouse. Now a thing under the mouse wins unless you click right on the creature's body. Each
+  slap took 15 Health in that creature's body, so this killed it several times.
+- **A red button looked the same as a red fruit to a creature.** Creatures see a button as a button now, so what it
+  learns about buttons never gets mixed up with food.
+- **Pushing a button didn't press it**, only touching did, so a creature could walk up to a button, push it, and
+  nothing happened. Pushing presses it now, and a button flashes when a creature presses it.
+- **The thought log says exactly what it did**: pressed a button, only went up to look, pushed something that didn't
+  budge, or tried to pick up something too big.
+- **Fears never faded.** Enough slaps or deaths left a creature scared of everything, so it wouldn't even eat. Fears
+  now fade over about 15 game minutes when nothing keeps them fresh, and **Calm it down**, in the mind panel, halves
+  everything it thinks went badly so it tries things again. You're warned when a creature gets like this.
+- **A creature shut in somewhere** now says it can't get to things, and you're told it might be shut in.
+- **The Fixed toggle** reset whenever you went to another tool and back. Each shape remembers it now.
+- **Ghosts that keep dying** in dimensions no longer pile fear onto the real creature. Fear and praise from ghosts are
+  averaged, while what helps each need still adds up.
+
+On the copy of that world, a creature freed from the box, calmed down twice and sent to the fruit four times went on to
+eat it 12 times by itself in the next five minutes. Before, it never did.

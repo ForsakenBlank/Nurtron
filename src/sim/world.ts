@@ -77,6 +77,7 @@ const FLOAT_STUCK = 15; // ticks of hardly moving before it tries another way
 const FLOAT_TRIES = 4; // ways it tries before deciding it can't get there
 const CANT_GO_QUIET = 6 * TICKS_PER_SECOND; // it only says it can't go somewhere this often
 export const CANT_GO = "I can't go there";
+const SHUT_IN_TICKS = 60 * TICKS_PER_SECOND;
 
 // a drive only teaches when something changed it by more than this during an action. the slow tick down of
 // hunger is left out completely: it says nothing about what the creature just did, and counting it
@@ -300,11 +301,15 @@ export interface Creature {
   judging?: { option: string; need: number; at: number }[]; // choices it hasn't yet seen the end of
   sayLater?: { text: string; at: number } | null; // something it's about to say, after a moment to think
   lastCantGo?: number; // the tick it last said it couldn't get somewhere
+  cantGoLog?: { tick: number; x: number; y: number }[]; // where it was each time lately, to notice it's shut in
+  lastShutIn?: number;
   brain: Brain;
 }
 
 export type WorldEvent =
-  | { type: 'touched'; who: number; thingId: number; name: string; ate: boolean; fatal: boolean; cuddle?: boolean }
+  | { type: 'touched'; who: number; thingId: number; name: string; ate: boolean; fatal: boolean; cuddle?: boolean; pressed?: boolean }
+  | { type: 'did'; who: number; thingId: number; name: string; how: 'looked' | 'pushed' | 'budged' | 'picked' | 'tooBig' }
+  | { type: 'shutIn'; who: number }
   | { type: 'petted'; who: number }
   | { type: 'slapped'; who: number }
   | { type: 'called'; who: number }
@@ -1803,6 +1808,7 @@ export class World {
   }
 
   private shapeOf(thing: Thing): Shape {
+    if (thing.part?.kind === 'button') return 'button';
     if (thing.form !== 'box') return thing.form;
     const long = Math.max(thing.hw, thing.hh);
     const short = Math.min(thing.hw, thing.hh);
@@ -2180,7 +2186,7 @@ export class World {
       if (doing.action === 'avoid') {
         this.walk(c, target.x >= c.x ? -1 : 1, 1);
       } else if (doing.action === 'approach') {
-        if (Math.abs(gap) <= REACH + 40) return this.endAction(true, c);
+        if (Math.abs(gap) <= REACH + 40) return this.arrived(c, target);
         this.walk(c, Math.sign(gap), 1);
       } else if (inReach) {
         c.facing = Math.sign(target.x - c.x) || c.facing;
@@ -2211,7 +2217,7 @@ export class World {
     const dx = near.x - c.x;
     const dy = near.y - bodyY;
     const distance = Math.hypot(dx, dy) || 1;
-    if (doing.action === 'approach' && distance <= REACH + 40) return this.endAction(true, c);
+    if (doing.action === 'approach' && distance <= REACH + 40) return this.arrived(c, target);
     if (doing.action !== 'avoid' && doing.action !== 'approach' && inReach) {
       this.floatRoutes.delete(c.id);
       c.facing = Math.sign(target.x - c.x) || c.facing;
@@ -2297,6 +2303,12 @@ export class World {
     return route.points;
   }
 
+  // it went up to something, only to look at it. it didn't touch or press it
+  private arrived(c: Creature, target: Thing): void {
+    if (!this.creatureById(target.id)) this.events.push({ type: 'did', who: c.id, thingId: target.id, name: target.name, how: 'looked' });
+    this.endAction(true, c);
+  }
+
   // it can't get to what it was going for: it stops, has a think, and says so
   private cantGo(c: Creature): void {
     this.endAction(false, c);
@@ -2304,6 +2316,15 @@ export class World {
     if (this.tick - (c.lastCantGo ?? -1e9) >= CANT_GO_QUIET) {
       c.lastCantGo = this.tick;
       c.sayLater = { text: CANT_GO, at: this.tick + TICKS_PER_SECOND };
+    }
+    // several things in a row it couldn't get to, without getting anywhere itself: it's probably shut in
+    const log = (c.cantGoLog ??= []).filter((l) => this.tick - l.tick < SHUT_IN_TICKS);
+    log.push({ tick: this.tick, x: c.x, y: c.y });
+    c.cantGoLog = log;
+    const wandered = Math.max(...log.map((l) => Math.hypot(l.x - c.x, l.y - c.y)));
+    if (log.length >= 4 && wandered < 300 && this.tick - (c.lastShutIn ?? -1e9) > 3 * SHUT_IN_TICKS) {
+      c.lastShutIn = this.tick;
+      this.events.push({ type: 'shutIn', who: c.id });
     }
   }
 
@@ -2429,7 +2450,11 @@ export class World {
     }
     if (doing.action === 'touch') {
       this.touched(c, target);
+    } else if (doing.action === 'push' && target.part?.kind === 'button') {
+      // pushing a button presses it, the same as touching it
+      this.touched(c, target);
     } else if (doing.action === 'push') {
+      this.events.push({ type: 'did', who: c.id, thingId: target.id, name: target.name, how: target.fixed ? 'budged' : 'pushed' });
       if (!target.fixed) {
         // heavy things barely budge
         const strength = Math.min(1, 12 / Math.max(1, this.physics.massOf(target.id)));
@@ -2438,7 +2463,9 @@ export class World {
         this.physics.setVelocity(target.id, target.vx, target.vy);
       }
     } else if (doing.action === 'grab') {
-      if (!target.fixed && boundingRadius(target) <= CARRY_SIZE && this.physics.massOf(target.id) <= CARRY_MASS) {
+      const carriable = !target.fixed && boundingRadius(target) <= CARRY_SIZE && this.physics.massOf(target.id) <= CARRY_MASS;
+      this.events.push({ type: 'did', who: c.id, thingId: target.id, name: target.name, how: carriable ? 'picked' : 'tooBig' });
+      if (carriable) {
         c.holding = target.id;
         target.heldBy = true;
         target.vx = target.vy = target.spin = 0;
@@ -2476,7 +2503,7 @@ export class World {
     this.circuit.takeCaused(c.id);
     this.readDrives(c, true);
     for (const drive of c.drives) if (drive.kind === 'drive' && needOf(drive) < before[drive.channel]) ate = true;
-    this.events.push({ type: 'touched', who: c.id, thingId: target.id, name: target.name, ate, fatal: c.dead });
+    this.events.push({ type: 'touched', who: c.id, thingId: target.id, name: target.name, ate, fatal: c.dead, pressed: target.part?.kind === 'button' });
     if (target.eaten) {
       const doing = c.doing;
       if (doing) doing.targetId = null; // so removing it doesn't end the action before it has learned from it

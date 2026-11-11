@@ -2,7 +2,8 @@
 // which is why what it learns still works on things and in rooms it has never met.
 
 // a creature is a shape of its own to another creature, since nothing else looks like one
-export const SHAPES = ['circle', 'square', 'triangle', 'hexagon', 'bar', 'creature'] as const;
+// a button is a shape of its own too, so a red button and a red fruit never get mixed up
+export const SHAPES = ['circle', 'square', 'triangle', 'hexagon', 'bar', 'creature', 'button'] as const;
 export const COLOURS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'grey'] as const;
 export const SIZES = ['small', 'medium', 'big'] as const;
 export const NEARNESS = ['close', 'nearby', 'far'] as const;

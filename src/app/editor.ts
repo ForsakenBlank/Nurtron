@@ -68,6 +68,8 @@ export class Editor {
   decor: Decor | null = null; // which decoration the Decor tool puts down
   colour: Colour = 'blue';
   newFixed = false;
+  // what you last set Fixed to for each shape, so going to another tool and back doesn't undo it
+  private fixedFor: Partial<Record<ShapeTool, boolean>> = {};
   selected = new Set<number>();
   gizmoOn = false;
   playing = false; // the game is running, so the mouse and keyboard belong to it
@@ -187,12 +189,19 @@ export class Editor {
     this.setTool('decor');
   }
 
+  // the Fixed box in the toolbar
+  setNewFixed(fixed: boolean): void {
+    this.newFixed = fixed;
+    if (isShapeTool(this.tool)) this.fixedFor[this.tool] = fixed;
+    else for (const shape of Object.keys(NEW_SHAPES) as ShapeTool[]) this.fixedFor[shape] = fixed;
+  }
+
   setTool(tool: Tool): void {
     if (!this.allows(tool)) return;
     this.tool = tool;
     if (tool !== 'hand') {
       this.gizmoOn = false;
-      if (isShapeTool(tool)) this.newFixed = NEW_SHAPES[tool].fixed;
+      if (isShapeTool(tool)) this.newFixed = this.fixedFor[tool] ?? NEW_SHAPES[tool].fixed;
       this.selected.clear();
       this.events.closeProperties();
     }
@@ -467,10 +476,15 @@ export class Editor {
   }
 
   // the one under the mouse. the one you're looking at wins if they're standing in the same place
+  // with something else under the mouse too, like a button it's standing next to, the click only counts as the
+  // creature's if it's right on its body. otherwise a right-click meant for the button slaps it
   onCreature(x: number, y: number): Creature | null {
     if (this.inBody || this.inArea) return null;
-    const hit = (c: Creature): boolean => Math.abs(x - c.x) <= 32 && y <= c.y + 4 && y >= c.y - 76;
-    return hit(this.world.creature) ? this.world.creature : (this.world.creatures.find(hit) ?? null);
+    const near = (c: Creature): boolean => !c.hiddenAway && Math.abs(x - c.x) <= 32 && y <= c.y + 4 && y >= c.y - 76;
+    const onBody = (c: Creature): boolean => Math.hypot(x - c.x, y - Math.max(c.y - 54, Math.min(c.y - 6, y))) <= 24;
+    const found = near(this.world.creature) ? this.world.creature : (this.world.creatures.find(near) ?? null);
+    if (!found || onBody(found)) return found;
+    return this.thingAt(x, y) ? null : found;
   }
 
   // ---- mouse ----

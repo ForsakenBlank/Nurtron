@@ -94,7 +94,19 @@ export class ThoughtLog {
         this.add(who, tick, event.told ? `You told it to ${verb}${what}` : `Decided to ${verb}${what}`, event.told ? 'told' : 'decide');
       } else if (event.type === 'touched') {
         if (event.fatal || event.cuddle) continue; // the line about dying, or cuddling, already says so
-        this.add(who, tick, event.ate ? `Touched the ${event.name}, and that helped` : `Touched the ${event.name}. Nothing much happened`, event.ate ? 'good' : 'plain');
+        if (event.pressed) this.add(who, tick, event.ate ? `Pressed the ${event.name} button, and that helped` : `Pressed the ${event.name} button`, event.ate ? 'good' : 'plain');
+        else this.add(who, tick, event.ate ? `Touched the ${event.name}, and that helped` : `Touched the ${event.name}. Nothing much happened`, event.ate ? 'good' : 'plain');
+      } else if (event.type === 'did') {
+        const words = {
+          looked: `Went up to the ${event.name} to look at it. It didn't touch or press it`,
+          pushed: `Pushed the ${event.name}`,
+          budged: `Pushed the ${event.name}, but it's fixed in place so it didn't move`,
+          picked: `Picked up the ${event.name}`,
+          tooBig: `Tried to pick up the ${event.name}, but it's too big, too heavy or fixed in place`,
+        }[event.how];
+        this.add(who, tick, words, event.how === 'picked' || event.how === 'pushed' ? 'good' : 'plain');
+      } else if (event.type === 'shutIn') {
+        this.add(who, tick, "Seems to be shut in. It can't get to anything", 'bad');
       } else if (event.type === 'cuddled') {
         this.add(who, tick, `Cuddled up to ${names.get(event.other) ?? 'another creature'}`, 'good');
         this.add(event.other, tick, `${names.get(who) ?? 'Another creature'} cuddled up to it`, 'good');

@@ -91,6 +91,7 @@ const IGNORE_BELOW = 0.35; // less alike than this and a concept doesn't fire at
 const SHARPEN = 6; // how much the closest match dominates
 const FEAR_SPREAD = 0.3; // a slap makes it wary of the whole thing, not just the action
 const FADE_PER_DECISION = 0.0004; // connections slowly fade
+const FORGIVE_SECONDS = 15 * 60; // a fright with nothing to keep it fresh fades to a third over this long
 const DISAPPOINT = 0.08; // how much a link weakens when it was felt but delivered nothing
 const MOST_CHANNELS = 24; // room files can bring nerve sockets with them, so this can't grow forever
 
@@ -889,6 +890,43 @@ export class Brain {
   drift(seconds: number): void {
     this.mood *= Math.exp(-seconds / 12);
     this.boredom = Math.min(1, this.boredom + seconds * 0.008);
+    // a fright fades if nothing keeps it fresh. without this, enough slaps or deaths leave it scared of everything for
+    // good, and a creature scared of everything won't even eat when it's starving
+    if (this.learning) {
+      const keep = Math.exp(-seconds / FORGIVE_SECONDS);
+      for (const c of this.concepts) for (let a = 0; a < ACTIONS.length; a++) {
+        const i = a * this.channels;
+        if (c.w[i] < 0) c.w[i] *= keep;
+      }
+    }
+  }
+
+  // you comforted it: everything it thinks went badly counts half as much, so it gives those things another go.
+  // what it knows helps stays as it is
+  soothe(): number {
+    let calmed = 0;
+    for (const c of this.concepts) {
+      for (let i = 0; i < c.w.length; i++) {
+        if (c.w[i] >= -0.05) continue;
+        calmed++;
+        c.w[i] *= 0.5;
+      }
+      // and it's a bit curious about them again
+      for (let a = 0; a < c.tries.length; a++) c.tries[a] *= 0.5;
+    }
+    this.mood = Math.max(this.mood, 0);
+    return calmed;
+  }
+
+  // how scared it is of things in general, 0 to 1, for warning you when it's got itself into a state
+  fearfulness(): number {
+    let total = 0;
+    let n = 0;
+    for (const c of this.concepts) for (let a = 0; a < ACTIONS.length; a++) {
+      total += Math.max(0, -c.w[a * this.channels]);
+      n++;
+    }
+    return n ? total / n : 0;
   }
 
   // why it chose what it did, in plain words
