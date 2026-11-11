@@ -24,7 +24,12 @@ import { cleanRoom } from '../sim/room-file.ts';
 import { canvasPen, DECOR_ART } from './decor-art.ts';
 import { parseTrial, saveTrial } from '../sim/trial-file.ts';
 import { openWorld, parseWorld, saveWorld } from '../sim/world-file.ts';
+import { Clock, cleanSpeed, speedWords } from '../sim/clock.ts';
+import type { Speed } from '../sim/clock.ts';
 import { BrainView } from './brain-view.ts';
+import { dimensionPanel } from './dimension-panel.ts';
+import { Dimensions } from './dimensions.ts';
+import { speedControl } from './speed-control.ts';
 import type { BrainSpot } from './brain-view.ts';
 import { CustomisePanel } from './customise.ts';
 import { Editor } from './editor.ts';
@@ -60,7 +65,8 @@ const SIZES = [
 const NEW_WORLD_SIZE = SIZES[1];
 const CURRENT_SAVE = 10;
 const ROOM_STEP = { across: 1000, up: 500 };
-const SPEEDS = [0, 1, 4, 16];
+const SPEED_KEY = 'nurtron.speed';
+const SPEED_KEYS: Speed[] = [1, 4, 16, 'max'];
 
 const hex = (n: number): string => `#${n.toString(16).padStart(6, '0')}`;
 
@@ -190,6 +196,7 @@ async function boot(): Promise<void> {
         <button id="play" title="Run what you've built as a game, with the editor out of the way. Everything goes back when you stop.">Play</button>
         <button id="brain-toggle" title="Show or hide what your creature is thinking (Tab)">Mind</button>
         <button id="help-open" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+        <button id="dims-open" title="Dimensions: ghost copies of your world that all share one brain, so your creature learns faster (K)">Dimensions</button>
         <span class="muted" id="speed-label">Speed</span>
         <div class="group" id="speeds"></div>
         <div class="egg-box">
@@ -232,6 +239,13 @@ async function boot(): Promise<void> {
             <div><b id="trial-name"></b> <span id="trial-time" class="muted"></span></div>
             <div id="trial-about" class="muted"></div>
             <div class="prop-actions"><button id="trial-retry">Try again</button><button id="trial-leave">Back to my room</button></div>
+          </div>
+          <div id="dim-banner">
+            <span class="ghost-mark">👻</span> <b id="dim-title"></b> <span class="muted" id="dim-sub"></span>
+            <label class="muted">Speed <input id="dim-speed" title="Any speed, or Max" /></label>
+            <button id="dim-prev" title="The previous dimension" aria-label="Previous dimension">◀</button>
+            <button id="dim-next" title="The next dimension" aria-label="Next dimension">▶</button>
+            <button id="dim-leave" class="primary">Back to your world</button>
           </div>
           <div id="play-banner">Playing. Esc to stop. <label class="muted"><input type="checkbox" id="play-empty" /> Without creatures</label></div>
           <div id="body-banner">
@@ -381,6 +395,7 @@ async function boot(): Promise<void> {
             <label class="update-auto"><input type="checkbox" id="pref-particles" /> Hearts, crumbs, dust and sparkles</label>
             <label class="update-auto"><input type="checkbox" id="pref-shake" /> Shake the view when you slap</label>
             <label class="update-auto"><input type="checkbox" id="pref-intent" /> A thought bubble showing what your creature is going for</label>
+            <label class="update-auto"><input type="checkbox" id="pref-routes" /> A dotted line showing the way a floating creature is flying</label>
             <label class="update-auto"><input type="checkbox" id="pref-minimap" /> The map of the whole room in the corner (M)</label>
             <label class="update-auto"><input type="checkbox" id="pref-sounds" /> Little sounds when things happen to your creatures <input type="range" id="pref-volume" min="0" max="1" step="0.05" aria-label="How loud" title="How loud" /></label>
             <div class="prop-actions"><button id="pref-guide">Show the first steps again</button></div>
@@ -413,7 +428,10 @@ async function boot(): Promise<void> {
       <div class="help-grid">
         <div class="prop-heading">Time and looking around</div>
         <span class="keys"><kbd>Space</kbd></span><span>Pause, or carry on</span>
-        <span class="keys"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span><span>Normal speed, 4 times, 16 times</span>
+        <span class="keys"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></span><span>Normal speed, 4 times, 16 times, Max</span>
+        <span class="keys"><kbd>,</kbd> <kbd>.</kbd></span><span>Halve or double the speed, from a twentieth up to 1000 times</span>
+        <span class="keys"><kbd>N</kbd></span><span>Move on by one tick, while paused</span>
+        <span class="keys"><kbd>K</kbd></span><span>Dimensions: ghost copies of your world that learn for your creature</span>
         <span class="keys"><kbd>F</kbd></span><span>Find your creature</span>
         <span class="keys"><kbd>L</kbd></span><span>Follow your creature as it moves</span>
         <span class="keys"><kbd>[</kbd> <kbd>]</kbd></span><span>Look at the previous or next creature</span>
@@ -475,8 +493,12 @@ async function boot(): Promise<void> {
   // with no world open, what's on screen is only a stand-in until one is chosen, and is never saved
   saving = store.activeId !== null;
   let inMenu = false;
-  let speed = 1;
-  let carry = 0;
+  let speed: Speed = 1;
+  let lastSpeed: Speed = 1; // what Space goes back to
+  const clock = new Clock();
+  // looking into a dimension, the world on screen is a ghost one, and yours carries on here
+  let home: World | null = null;
+  const dims = new Dimensions(() => home ?? world);
   let lastDecision: Decision | null = null;
     let shownFocus = world.focusId;
   const thoughts = new ThoughtLog();
@@ -689,20 +711,31 @@ async function boot(): Promise<void> {
     if (e.key === 'Enter') nameBox.blur();
   });
 
-  // speed buttons
-  const speedBox = $('speeds');
-  const speedButtons = SPEEDS.map((s) => {
-    const b = document.createElement('button');
-    b.textContent = s === 0 ? 'Pause' : `${s}x`;
-    b.addEventListener('click', () => setSpeed(s));
-    speedBox.appendChild(b);
-    return b;
-  });
-  function setSpeed(s: number): void {
+  // speed: any number, Max, slow motion, and one tick at a time
+  const speedUi = speedControl($('speeds'), (s) => setSpeed(s), () => stepOnce());
+  function setSpeed(s: Speed): void {
     speed = s;
-    speedButtons.forEach((b, i) => b.classList.toggle('on', SPEEDS[i] === s));
+    if (s !== 0) lastSpeed = s;
+    clock.speed = s;
+    speedUi.set(s);
+    try {
+      localStorage.setItem(SPEED_KEY, JSON.stringify(s));
+    } catch {
+      // it just starts at normal speed next time
+    }
   }
-  setSpeed(1);
+  function stepOnce(): void {
+    if (inMenu) return;
+    if (speed !== 0) setSpeed(0);
+    (home ?? world).step();
+  }
+  // the speed you left it at, but never paused, since a world that seems frozen when it opens is confusing
+  try {
+    const saved = cleanSpeed(JSON.parse(localStorage.getItem(SPEED_KEY) ?? '1'));
+    setSpeed(saved === 0 ? 1 : saved);
+  } catch {
+    setSpeed(1);
+  }
 
   // tools
   const toolBox = $('tools');
@@ -1360,6 +1393,12 @@ async function boot(): Promise<void> {
 
   function swapWorld(next: World): void {
     editor.setView('room');
+    // dimensions are copies of the world that's going, so they go too
+    if (home) leaveDimensionNow();
+    if (dims.count) {
+      dims.clear();
+      toast('Dimensions belong to a world, so the ones you had were deleted.');
+    }
     const old = world;
     world = next;
     old.dispose();
@@ -1559,10 +1598,21 @@ async function boot(): Promise<void> {
     }
     if (e.code === 'Space') {
       e.preventDefault();
-      setSpeed(speed === 0 ? 1 : 0);
+      setSpeed(speed === 0 ? lastSpeed : 0);
     }
-    const index = ['Digit1', 'Digit2', 'Digit3'].indexOf(e.code);
-    if (index >= 0) setSpeed(SPEEDS[index + 1]);
+    const index = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
+    if (index >= 0) setSpeed(SPEED_KEYS[index]);
+    if (e.code === 'Comma' || e.code === 'Period') {
+      const now = speed === 'max' ? Math.max(1, Math.round(clock.achieved)) : speed === 0 ? lastSpeed === 'max' ? 16 : lastSpeed : speed;
+      const next = cleanSpeed(e.code === 'Period' ? now * 2 : now / 2);
+      if (next !== 0) {
+        setSpeed(next);
+        toast(`Speed ${speedWords(next)}`);
+      }
+    }
+    if (e.code === 'KeyN' && !e.shiftKey) stepOnce();
+    if (e.code === 'KeyK') dimsPanel.toggle();
+    if (e.code === 'Escape' && home) void leaveDimension();
     if (playingFrom) return;
     if (e.key === '?') toggleHelp();
     else if (e.key === 'Escape' && helpBox.style.display === 'block') toggleHelp();
@@ -2028,7 +2078,7 @@ async function boot(): Promise<void> {
 
   // ---- the main menu: worlds, and settings ----
   // everything here is on unless it was switched off, so a new setting starts on for everyone
-  const PREF_NAMES = ['menuAtStart', 'scenery', 'particles', 'shake', 'intent', 'minimap', 'sounds'] as const;
+  const PREF_NAMES = ['menuAtStart', 'scenery', 'particles', 'shake', 'intent', 'routes', 'minimap', 'sounds'] as const;
   type Prefs = Record<(typeof PREF_NAMES)[number], boolean>;
   const prefs = ((): Prefs => {
     const all = Object.fromEntries(PREF_NAMES.map((name) => [name, true])) as Prefs;
@@ -2064,6 +2114,7 @@ async function boot(): Promise<void> {
   // the world stops while the menu is up, and gets a fresh picture for its card
   function openMenu(tab: 'worlds' | 'settings' = 'worlds'): void {
     if (playingFrom) setPlaying(false);
+    if (home) void leaveDimension();
     inMenu = true;
     menu.style.display = 'flex';
     showTab(tab);
@@ -2286,6 +2337,7 @@ async function boot(): Promise<void> {
     sounds.volume = Number(volumeBox.value);
     volumeBox.disabled = !prefs.sounds;
     scene.setOptions({ ...DEFAULT_SCENE_OPTIONS, scenery: prefs.scenery, particles: prefs.particles, shake: prefs.shake, intent: prefs.intent });
+    scene.showRoutes = prefs.routes;
     $('app').classList.toggle('no-minimap', !prefs.minimap);
     for (const name of PREF_NAMES) {
       const box = $<HTMLInputElement>(name === 'menuAtStart' ? 'pref-menu-start' : `pref-${name}`);
@@ -2351,11 +2403,15 @@ async function boot(): Promise<void> {
     // paused, or in the menu, nothing moves at all, so nothing should look like it's moving either
     const still = inMenu || speed === 0;
     const moving = still ? 0 : dt;
-    carry += moving * speed * TICKS_PER_SECOND;
-    const steps = Math.min(64, Math.floor(carry));
-    carry -= Math.floor(carry);
-    for (let i = 0; i < steps; i++) world.step();
-    const events = world.takeEvents();
+    // your world goes at your speed. looking into a dimension, that's stepped by the dimension instead
+    const yours = home ?? world;
+    clock.frame(inMenu ? 0 : dt, TICKS_PER_SECOND, () => yours.step(), dims.count ? 10 : 14);
+    dims.update(inMenu ? 0 : dt, home ? 8 : 4);
+    let events = yours.takeEvents();
+    if (home) {
+      for (const e of events) if (e.type === 'died') toast(`${home.creatureById(e.who)?.name ?? 'Your creature'} has died in your world.`);
+      events = dims.takeViewEvents();
+    }
     for (const event of events) {
       if (event.type === 'petted') guide.mark('pet');
       else if (event.type === 'touched' && event.ate && !event.cuddle) guide.mark('eat');
@@ -2389,7 +2445,7 @@ async function boot(): Promise<void> {
     }
     if (world.focusId !== shownFocus) syncFocus();
     scene.handle(events, world);
-    scene.draw(world, moving, speed, carry, editor.overlay());
+    scene.draw(world, home ? dt : moving, speed === 'max' ? 1000 : speed, home ? dims.viewCarry() : clock.carry % 1, editor.overlay());
     // no point working out a picture of something nobody can see
     if (panelState.open && ($('brain-box') as HTMLDetailsElement).open) brainView.draw(world.creature.brain, world.needs(), world.creature.drives, moving);
 
@@ -2402,11 +2458,13 @@ async function boot(): Promise<void> {
       renderTrial();
       renderGameHud();
       if (prefs.minimap && scene.view === 'room' && !playingFrom) minimap.draw();
-      $('paused-badge').classList.toggle('on', speed === 0 && !inMenu && !playingFrom);
+      $('paused-badge').classList.toggle('on', speed === 0 && !inMenu && !playingFrom && !home);
+      speedUi.showReal(clock.achieved, clock.behind, speed);
+      if (home) renderDimBanner();
       $<HTMLButtonElement>('undo').disabled = !editor.history.canUndo;
       $<HTMLButtonElement>('redo').disabled = !editor.history.canRedo;
       if (editor.inBody) guide.mark('inside');
-      if (speed > 1) guide.mark('speed');
+      if (speed === 'max' || speed > 1) guide.mark('speed');
       if (panelState.open) {
         renderNow();
         renderThoughts();
@@ -2416,13 +2474,88 @@ async function boot(): Promise<void> {
     sinceSave += dt;
     if (sinceSave > 10 && !inMenu) {
       sinceSave = 0;
-      if (!save(world) && !warnedSave) {
+      if (!save(home ?? world) && !warnedSave) {
         warnedSave = true;
         toast("Couldn't save. Use Files to save your world, so you don't lose anything.");
       }
     }
   });
-  window.addEventListener('beforeunload', () => save(world));
+  window.addEventListener('beforeunload', () => save(home ?? world));
+
+  // ---- dimensions ----
+  const dimsPanel = dimensionPanel({ dims, toast, enter: (id) => void enterDimension(id), mainSpeed: () => (inMenu || speed === 0 ? 0 : clock.achieved) });
+  dims.onMessage = toast;
+  $('dims-open').addEventListener('click', () => dimsPanel.toggle());
+  // looking into a dimension: it moves into the window so you can watch it, and you can't build there
+  async function enterDimension(id: number): Promise<void> {
+    if (playingFrom) setPlaying(false);
+    editor.setView('room');
+    if (home) {
+      leaveDimensionNow();
+      await dims.leave();
+    }
+    const ghost = await dims.enter(id);
+    if (!ghost) return toast("Couldn't look into that dimension.");
+    home = world;
+    world = ghost;
+    editor.playing = true;
+    scene.ghostly = true;
+    $('app').classList.add('viewing');
+    syncFocus();
+    scene.syncSize(world);
+    scene.centreOn(world.creature.x, world.creature.y);
+    renderDimBanner();
+    toast('These are ghosts. What they learn goes into your creature. Esc comes back.');
+  }
+  // back to your own world straight away. the dimension goes back to its thread afterwards
+  function leaveDimensionNow(): void {
+    if (!home) return;
+    world = home;
+    home = null;
+    editor.playing = false;
+    scene.ghostly = false;
+    $('app').classList.remove('viewing');
+    syncFocus();
+    scene.syncSize(world);
+  }
+  async function leaveDimension(): Promise<void> {
+    if (!home) return;
+    leaveDimensionNow();
+    scene.centreOn(world.creature.x, world.creature.y);
+    await dims.leave();
+  }
+  function renderDimBanner(): void {
+    const d = dims.viewing === null ? undefined : dims.get(dims.viewing);
+    if (!d) {
+      if (home) void leaveDimension();
+      return;
+    }
+    $('dim-title').textContent = d.name;
+    const s = d.backend.stats;
+    $('dim-sub').textContent = `${d.paused ? 'paused' : `really ${speedWords(Math.round(s.speed * 10) / 10 || 0)}`} · ${s.ate} eaten · ${s.deaths} died`;
+    const box = $<HTMLInputElement>('dim-speed');
+    if (document.activeElement !== box) box.value = speedWords(d.speed).replace(/x$/, '');
+  }
+  $('dim-leave').addEventListener('click', () => void leaveDimension());
+  $<HTMLInputElement>('dim-speed').addEventListener('change', (e) => {
+    const input = e.target as HTMLInputElement;
+    const text = input.value.trim().toLowerCase();
+    const s = text === 'max' ? 'max' : cleanSpeed(Number(text.replace(/x$/, '')));
+    if (dims.viewing !== null && s !== 0) dims.setSpeed(dims.viewing, s);
+    else toast('That speed should be a number, like 16, or Max.');
+    input.blur();
+  });
+  $('dim-speed').addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+  });
+  for (const [button, by] of [['dim-prev', -1], ['dim-next', 1]] as const) {
+    $(button).addEventListener('click', () => {
+      const i = dims.list.findIndex((d) => d.id === dims.viewing);
+      const next = dims.list[(i + by + dims.list.length) % dims.list.length];
+      if (next && next.id !== dims.viewing) void enterDimension(next.id);
+    });
+  }
 
   renderHud();
   renderLearned();
@@ -2432,7 +2565,7 @@ async function boot(): Promise<void> {
 
   // for checking the running game from the console and from tests
   Object.assign(window, {
-    nurtron: { getWorld: () => world, getDecision: () => lastDecision, setSpeed, editor, scene, ROOM, store, openMenu, closeMenu },
+    nurtron: { getWorld: () => world, getHome: () => home ?? world, getDecision: () => lastDecision, setSpeed, editor, scene, ROOM, store, openMenu, closeMenu, dims, enterDimension, leaveDimension },
   });
 }
 

@@ -15,6 +15,8 @@ import { BULLET_SIZE } from './game.ts';
 import type { Bullet, Enemy } from './game.ts';
 import { isSocket, mayHaveSockets, partHeight, toNumber } from './parts.ts';
 import type { EffectStat, Part, Value, Wants } from './parts.ts';
+import { buildGrid, clearLine, findPath } from './float-path.ts';
+import type { Point } from './float-path.ts';
 import { JUMP_RISE, LEAP_SPEED, planRoute } from './navigate.ts';
 import type { Ledge, RouteStep } from './navigate.ts';
 import { BODY, GRAVITY, Physics } from './physics.ts';
@@ -70,6 +72,11 @@ const PICK_UP = 40; // how close an item has to be to its middle for a creature 
 const MAGNET_REACH = 160; // and how much further each bit of Magnet pulls items in from
 const ATTACK = 10; // what a creature's touch or push does to something with health, before any Attack effect
 const CHOICE_LEARN_TICKS = 12 * TICKS_PER_SECOND; // how long after a choice it judges how well it went
+const FLOAT_REPLAN = 45; // ticks between working out a way through the air again
+const FLOAT_STUCK = 15; // ticks of hardly moving before it tries another way
+const FLOAT_TRIES = 4; // ways it tries before deciding it can't get there
+const CANT_GO_QUIET = 6 * TICKS_PER_SECOND; // it only says it can't go somewhere this often
+export const CANT_GO = "I can't go there";
 
 // a drive only teaches when something changed it by more than this during an action. the slow tick down of
 // hunger is left out completely: it says nothing about what the creature just did, and counting it
@@ -291,6 +298,8 @@ export interface Creature {
   boosts: Boost[]; // Effects on it right now
   likes: Record<string, number>; // how well each thing it has picked from a Choice has turned out
   judging?: { option: string; need: number; at: number }[]; // choices it hasn't yet seen the end of
+  sayLater?: { text: string; at: number } | null; // something it's about to say, after a moment to think
+  lastCantGo?: number; // the tick it last said it couldn't get somewhere
   brain: Brain;
 }
 
@@ -323,7 +332,8 @@ export type WorldEvent =
   | { type: 'killed'; x: number; y: number; colour: Colour; name: string }
   | { type: 'fired'; x: number; y: number; style: string; range: number; colour: Colour }
   | { type: 'choosing'; who: number; options: string[] }
-  | { type: 'chose'; who: number; options: string[]; picked: number };
+  | { type: 'chose'; who: number; options: string[]; picked: number }
+  | { type: 'spoke'; who: number; text: string };
 
 export interface WorldOptions {
   seed: number;
@@ -376,6 +386,8 @@ export class World {
   choosing: Choosing | null = null; // a creature is picking, and everything else waits
   private zones: Thing[] = [];
   private routes = new Map<number, { at: number; step: RouteStep | null }>();
+  // the way through the air each floating creature is following
+  private floatRoutes = new Map<number, { targetId: number; tx: number; ty: number; points: Point[]; at: number; fails: number; stuck: number; lastX: number; lastY: number }>();
   private visible = new Set<number>(); // what could be seen last tick, so something new coming into view gets noticed
   private returned = new Set<number>(); // eaten things coming back this tick, which nothing did on purpose
   private effects: Effect[] = [];
@@ -2031,6 +2043,10 @@ export class World {
   }
 
   private stepCreature(c: Creature): void {
+    if (c.sayLater && this.tick >= c.sayLater.at) {
+      if (!c.dead) this.events.push({ type: 'spoke', who: c.id, text: c.sayLater.text });
+      c.sayLater = null;
+    }
     c.walking = false;
     c.wantVx = 0;
     c.wantVy = 0;
@@ -2171,10 +2187,10 @@ export class World {
         return this.reach(c, doing, target);
       } else {
         // right underneath something it can't get up to, so there's no point standing there
-        if (Math.abs(gap) < 4) return this.endAction(false, c);
+        if (Math.abs(gap) < 4) return this.cantGo(c);
         this.walk(c, Math.sign(gap), 1);
       }
-      if (this.gaveUp(c)) return this.endAction(false, c);
+      if (this.gaveUp(c)) return doing.action === 'avoid' ? this.endAction(false, c) : this.cantGo(c);
       if (this.tick >= doing.until) return this.endAction(doing.action === 'avoid', c);
       return;
     } else if (doing.action === 'wander') {
@@ -2189,22 +2205,106 @@ export class World {
     if (this.tick >= doing.until) this.endAction(true, c);
   }
 
-  // with nothing pulling on it, it just goes straight there, walking on the air
+  // with nothing pulling on it, it flies there on the air, finding a way round anything in between
   private actFloating(c: Creature, doing: Doing, target: Thing, near: { x: number; y: number }, inReach: boolean): void {
+    const bodyY = c.y - BODY.centreAboveFeet;
     const dx = near.x - c.x;
-    const dy = near.y - (c.y - BODY.centreAboveFeet);
+    const dy = near.y - bodyY;
     const distance = Math.hypot(dx, dy) || 1;
     if (doing.action === 'approach' && distance <= REACH + 40) return this.endAction(true, c);
     if (doing.action !== 'avoid' && doing.action !== 'approach' && inReach) {
+      this.floatRoutes.delete(c.id);
       c.facing = Math.sign(target.x - c.x) || c.facing;
       return this.reach(c, doing, target);
     }
-    const away = doing.action === 'avoid' ? -1 : 1;
     const speed = WALK_SPEED * c.brain.genes.pace * this.speedOf(c);
-    this.walk(c, Math.sign(dx * away) || c.facing, 0);
-    c.wantVx = (dx / distance) * speed * away;
-    c.wantVy = (dy / distance) * speed * away;
-    if (this.tick >= doing.until) this.endAction(doing.action === 'avoid', c);
+    if (doing.action === 'avoid') {
+      this.walk(c, Math.sign(-dx) || c.facing, 0);
+      c.wantVx = (-dx / distance) * speed;
+      c.wantVy = (-dy / distance) * speed;
+      if (this.tick >= doing.until) this.endAction(true, c);
+      return;
+    }
+    const way = this.floatWay(c, doing, target, near, speed);
+    if (way === 'none') {
+      this.floatRoutes.delete(c.id);
+      return this.cantGo(c);
+    }
+    const aim = way ?? near;
+    const ax = aim.x - c.x;
+    const ay = aim.y - bodyY;
+    const ad = Math.hypot(ax, ay) || 1;
+    this.walk(c, Math.sign(ax) || c.facing, 0);
+    c.wantVx = (ax / ad) * speed;
+    c.wantVy = (ay / ad) * speed;
+    if (this.tick >= doing.until) this.endAction(false, c);
+  }
+
+  // the next point to fly to, null to go straight there, or 'none' if there's no way at all
+  private floatWay(c: Creature, doing: Doing, target: Thing, near: { x: number; y: number }, speed: number): Point | null | 'none' {
+    const bodyY = c.y - BODY.centreAboveFeet;
+    let route = this.floatRoutes.get(c.id);
+    if (route && route.targetId !== target.id) route = undefined;
+    if (route) {
+      const progress = Math.hypot(c.x - route.lastX, bodyY - route.lastY);
+      route.stuck = progress < speed * DT * 0.2 ? route.stuck + 1 : Math.max(0, route.stuck - 1);
+      route.lastX = c.x;
+      route.lastY = bodyY;
+    }
+    const stuck = !!route && route.stuck >= FLOAT_STUCK;
+    const moved = !!route && Math.hypot(route.tx - near.x, route.ty - near.y) > 40;
+    if (!route || stuck || moved || this.tick - route.at >= FLOAT_REPLAN) {
+      const fails = (route?.fails ?? 0) + (stuck ? 1 : 0);
+      if (fails >= FLOAT_TRIES) return 'none';
+      const from = { x: c.x, y: bodyY };
+      const grid = buildGrid(this.floatObstacles(target), { left: 0, top: 0, right: this.size.width, bottom: this.size.floor }, from, near);
+      const close = doing.action === 'approach' ? REACH + 30 : REACH - 6;
+      let points: Point[] | null = [];
+      // stuck going straight means something it didn't see is in the way, so it looks for a way round anyway
+      if (stuck || !clearLine(grid, from, near)) {
+        points = findPath(grid, from, near, (p) => {
+          const q = closestPoint(target, p.x, p.y);
+          return Math.hypot(q.x - p.x, q.y - p.y) <= close;
+        });
+      }
+      if (!points) return 'none';
+      route = { targetId: target.id, tx: near.x, ty: near.y, points, at: this.tick, fails, stuck: 0, lastX: c.x, lastY: bodyY };
+      this.floatRoutes.set(c.id, route);
+      // a way round takes longer than going straight, so it gets the time it needs
+      let length = 0;
+      let at = from;
+      for (const p of points) {
+        length += Math.hypot(p.x - at.x, p.y - at.y);
+        at = p;
+      }
+      const needs = this.tick + Math.round(((length / Math.max(20, speed)) * 1.6 + 3) * TICKS_PER_SECOND);
+      if (doing.until < needs) doing.until = needs;
+    }
+    while (route.points.length && Math.hypot(route.points[0].x - c.x, route.points[0].y - bodyY) < 18) route.points.shift();
+    return route.points[0] ?? null;
+  }
+
+  // everything solid a floating creature has to go round
+  private floatObstacles(target: Thing): Thing[] {
+    return this.things.filter((t) => t.id !== target.id && t.solid && !t.inBody && !t.voice && !t.heldBy && !t.dragged && !t.bullet && t.area === undefined && (!t.part || t.part.kind !== 'zone'));
+  }
+
+  // the way it's flying, for drawing. empty if it isn't following one
+  routeOf(id: number): Point[] {
+    const c = this.creatureById(id);
+    const route = this.floatRoutes.get(id);
+    if (!c || !route || !c.floating || !c.doing || c.doing.targetId !== route.targetId) return [];
+    return route.points;
+  }
+
+  // it can't get to what it was going for: it stops, has a think, and says so
+  private cantGo(c: Creature): void {
+    this.endAction(false, c);
+    c.pause = Math.max(c.pause, Math.round(1.5 * TICKS_PER_SECOND));
+    if (this.tick - (c.lastCantGo ?? -1e9) >= CANT_GO_QUIET) {
+      c.lastCantGo = this.tick;
+      c.sayLater = { text: CANT_GO, at: this.tick + TICKS_PER_SECOND };
+    }
   }
 
   // everything that could be stood on, as it is right now

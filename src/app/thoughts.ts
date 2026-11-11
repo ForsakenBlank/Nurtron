@@ -129,6 +129,8 @@ export class ThoughtLog {
         this.add(who, tick, `Went over ${event.moments === 1 ? 'something' : `${event.moments} things`} that happened lately while resting`, 'plain');
       } else if (event.type === 'noticed') {
         this.add(who, tick, `Noticed the ${event.name} appear just after it tried to ${DOING[event.after]} the ${event.cause}`, 'plain');
+      } else if (event.type === 'spoke') {
+        this.add(who, tick, `Said "${event.text}"`, 'bad');
       } else if (event.type === 'planned') {
         const then = event.steps.map((step) => `${DOING[step.action]} the ${describe(step.percept)}`).join(', then ');
         this.add(who, tick, `Worked out what this leads to: after it, it could ${then}`, 'decide');

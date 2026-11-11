@@ -10,4 +10,6 @@ export default defineConfig({
   define: { __APP_VERSION__: JSON.stringify(version) },
   build: { outDir: 'dist', chunkSizeWarningLimit: 4000 },
   server: { port: 5183, strictPort: true },
+  // dimensions run in threads of their own, which import the same modules as the window
+  worker: { format: 'es' },
 });

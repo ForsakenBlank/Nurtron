@@ -25,6 +25,8 @@ In most creature games, the designers decide what a creature's body and needs ar
 - **Words and Trials.** Teach a creature to come when called, or send a friend a room built to test their creature.
 - **A game maker.** Keyboard, Mouse, Spawner, Collision, Camera, Sound and more, plus enemies with pathfinding, health, items, chests, Storage for things like cash and score, Movers with keyframes, Chance, Abilities, Effects and Choices the creature makes for itself, and a Play mode that hides the editor so what you built runs as a game.
 - **Over 160 decorations**: blocks, trees, torches, chests, treasure, food and ready-made enemies.
+- **Dimensions.** Copies of your world full of ghosts of your creatures, each running in its own thread. They all share one brain, so your creature learns from every ghost at once. Any speed for each, a look inside any of them, and stats on which setup learns fastest on your computer.
+- **Any speed**, from a twentieth of normal to 1000 times, or Max, without the window freezing up.
 
 ## Playing it
 
@@ -67,14 +69,16 @@ npm start
 - **Settings** in the main menu can switch off the scenery, particles, screen shake, sounds, the thought bubble and the map.
 - **The Room arrows** at the bottom left of the map add more space on any side, any time. **World settings** in Files can set an exact size.
 - **Tab** or **Mind** shows and hides what it's thinking. Drag the panel's edge to resize it.
-- **Space** pauses, and **1**, **2** and **3** set the speed.
+- **Space** pauses, and **1**, **2**, **3** and **4** set the speed to normal, 4 times, 16 times and Max. **,** and **.** halve and double it, and **⋯** next to the speed buttons sets any speed, with slow motion and a button to step one tick. **N** steps one tick while paused.
+- **Dimensions** (or **K**) makes copies of your world with ghosts of your creatures that share one brain. Each runs at its own speed in a thread of its own, and every few seconds what the ghosts learned goes into your real creature. **Look** watches one, and **Find the best setup** tries a few on your computer and says which learns fastest.
+- **In zero gravity**, creatures fly round anything in the way instead of into it. When there's no way to something, a creature stops for a moment and says "I can't go there".
 - Hover over anything to see what it has learned about that thing.
 
 It saves by itself. Your creatures are still there when you come back, and a world stops while the game is closed or you're on the main menu.
 
 ### More detail
 
-The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), watching, resting, places and planning are in [docs/milestone-8.md](docs/milestone-8.md), the main menu, worlds, settings and updates are in [docs/milestone-9.md](docs/milestone-9.md), creatures noticing each other, the new look, the map, sounds and the first steps are in [docs/milestone-10.md](docs/milestone-10.md), and build areas, decorations and everything for making games are in [docs/milestone-11.md](docs/milestone-11.md).
+The building controls are in [docs/milestone-1.md](docs/milestone-1.md), wiring is in [docs/milestone-2.md](docs/milestone-2.md), bodies are in [docs/milestone-3.md](docs/milestone-3.md), files and tools are in [docs/milestone-4.md](docs/milestone-4.md), families, orders and getting around are in [docs/milestone-5.md](docs/milestone-5.md), words, Trials, gravity and the game-making parts are in [docs/milestone-6.md](docs/milestone-6.md), watching, resting, places and planning are in [docs/milestone-8.md](docs/milestone-8.md), the main menu, worlds, settings and updates are in [docs/milestone-9.md](docs/milestone-9.md), creatures noticing each other, the new look, the map, sounds and the first steps are in [docs/milestone-10.md](docs/milestone-10.md), build areas, decorations and everything for making games are in [docs/milestone-11.md](docs/milestone-11.md), and dimensions, any speed and flying round things in zero gravity are in [docs/milestone-12.md](docs/milestone-12.md).
 
 ## Commands
 

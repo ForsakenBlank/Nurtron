@@ -1,7 +1,7 @@
 {
   "name": "nurtron",
   "productName": "Nurtron",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "description": "A sandbox where you wire up a living creature's body, then raise what you've made.",
   "private": true,
   "type": "module",

@@ -120,6 +120,9 @@ export class Scene {
   private zPool: Text[] = [];
   private particles: Particle[] = [];
   playing = false; // the editor is out of the way, and this is a game now
+  ghostly = false; // looking into a dimension, where every creature is a ghost of a real one
+  showRoutes = true; // the way a floating creature is going, as a dotted line
+  private speech = new Map<number, { text: Text; until: number }>(); // something a creature just said
   options: SceneOptions = { ...DEFAULT_SCENE_OPTIONS };
   private voices = new Map<number, Text>();
   private faces = new Map<number, Face>();
@@ -438,6 +441,18 @@ export class Scene {
         continue;
       }
       if (event.type === 'pulse' || event.type === 'loop' || event.type === 'said' || event.type === 'sound' || event.type === 'solved' || event.type === 'choosing' || event.type === 'chose') continue;
+      if (event.type === 'spoke') {
+        let said = this.speech.get(event.who);
+        if (!said) {
+          said = { text: new Text({ text: '', style: { fontFamily: 'sans-serif', fontSize: 15, fontWeight: 'bold', fill: 0x14202a } }), until: 0 };
+          said.text.anchor.set(0.5);
+          this.speech.set(event.who, said);
+          this.textLayer.addChild(said.text);
+        }
+        said.text.text = event.text;
+        said.until = this.time + 2.6;
+        continue;
+      }
       const c = world.creatureById(event.who);
       if (!c) continue;
       const face = this.faceOf(c);
@@ -851,7 +866,10 @@ export class Scene {
 
   private drawCreatures(world: World): void {
     const g = this.creatureLayer.clear();
+    this.creatureLayer.alpha = this.ghostly ? 0.55 : 1;
     for (const c of world.creatures) if (!c.hiddenAway) this.drawCreature(g, world, c);
+    if (this.showRoutes && this.view === 'room') this.drawRoutes(world);
+    this.drawSpeech(world);
     // who the one you're looking at is going for, when it's another creature
     const focused = world.creature;
     const after = focused.doing ? world.creatureById(focused.doing.targetId ?? -1) : undefined;
@@ -955,6 +973,50 @@ export class Scene {
       this.spawn('puff', x - c.facing * 14, floor - 3, -c.facing * rand(10, 30), rand(-18, -6), 0.55, rand(3, 5), 0x8a90a3);
     }
     if (this.options.intent && !c.dead && !c.dragged && c.id === world.focusId) this.drawIntent(g, world, c, x, feetY - 84 * size);
+  }
+
+  // the way a floating creature has worked out through the air, as dots
+  private drawRoutes(world: World): void {
+    const g = this.creatureLayer;
+    for (const c of world.creatures) {
+      const points = world.routeOf(c.id);
+      if (!points.length) continue;
+      const face = this.faceOf(c);
+      let from = { x: face.head.x, y: face.head.y - 30 };
+      for (const p of points) {
+        const d = Math.hypot(p.x - from.x, p.y - from.y);
+        for (let s = 10; s < d; s += 18) g.circle(from.x + ((p.x - from.x) * s) / d, from.y + ((p.y - from.y) * s) / d, 2.5).fill({ color: c.look.belly, alpha: 0.6 });
+        from = p;
+      }
+      const end = points[points.length - 1];
+      g.circle(end.x, end.y, 6).stroke({ width: 2, color: c.look.belly, alpha: 0.8 });
+    }
+  }
+
+  // a speech bubble over a creature that just said something
+  private drawSpeech(world: World): void {
+    const g = this.creatureLayer;
+    for (const [id, said] of this.speech) {
+      const c = world.creatureById(id);
+      if (!c || this.time > said.until || this.view !== 'room') {
+        said.text.visible = false;
+        if (!c) {
+          said.text.destroy();
+          this.speech.delete(id);
+        }
+        continue;
+      }
+      const face = this.faceOf(c);
+      const x = face.head.x;
+      const y = face.head.y - 84 * stageSize(world.tick - c.bornTick) - 34;
+      const fade = Math.min(1, (said.until - this.time) / 0.4);
+      const hw = said.text.width / 2 + 12;
+      g.roundRect(x - hw, y - 16, hw * 2, 32, 12).fill({ color: 0xffffff, alpha: 0.95 * fade });
+      g.poly([x - 7, y + 15, x + 7, y + 15, x, y + 25]).fill({ color: 0xffffff, alpha: 0.95 * fade });
+      said.text.visible = true;
+      said.text.alpha = fade;
+      said.text.position.set(x, y);
+    }
   }
 
   // a thought bubble with a little picture of what it's going for, once that's far enough off to lose track of
